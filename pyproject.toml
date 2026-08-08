@@ -52,7 +52,7 @@ homepage = "https://github.com/sdatkinson/"
 
 [project.scripts]
 nam = "nam.cli:nam_gui"
-nam-capture = "nam.capture.gui.main:main"
+nam-capture = "nam.capture.gui.launcher:main"
 nam-full = "nam.cli:nam_full"
 nam-full-parametric = "nam.cli:nam_full_parametric"
 nam-hello-world = "nam.cli:nam_hello_world"
