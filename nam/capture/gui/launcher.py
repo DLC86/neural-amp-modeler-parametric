@@ -84,6 +84,22 @@ def main() -> None:
     """Launch the normal GUI after installing the device-list compatibility shim."""
     _sys.argv[:] = configure_asio(_sys.argv)
 
+    # On Windows, the GUI's periodic sample-rate check historically reinitialised
+    # PortAudio every few seconds. That is disruptive for PortAudio backends such as
+    # MOD Desktop's JACK bridge, which can emit a client-creation dialog whenever the
+    # backend is torn down and recreated. The initial device refresh still performs
+    # the explicit PortAudio refresh, but the background poll must not reinitialise it.
+    # This wrapper preserves the live-rate API while making its periodic calls cheap.
+    if _sys.platform == "win32":
+        from .. import audio as _audio
+
+        _current_device_sample_rates = _audio.current_device_sample_rates
+
+        def _poll_device_sample_rates(*, allow_reinit: bool = False):
+            return _current_device_sample_rates(allow_reinit=False)
+
+        _audio.current_device_sample_rates = _poll_device_sample_rates
+
     from . import main as _gui
 
     _gui.duplex_devices = logical_duplex_devices
