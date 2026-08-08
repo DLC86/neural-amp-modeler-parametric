@@ -9,6 +9,8 @@ capture engine or project format.
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
 from dataclasses import replace as _replace
 from typing import Sequence as _Sequence
 
@@ -55,15 +57,33 @@ def logical_duplex_devices(
         # the input direction. CaptureSession resolves the output index independently.
         representative = inputs[0]
         output_channels = max(device.max_output_channels for device in outputs)
-        result.append(
-            _replace(representative, max_output_channels=output_channels)
-        )
+        result.append(_replace(representative, max_output_channels=output_channels))
 
     return result
 
 
+def configure_asio(argv: _Sequence[str], *, platform: str | None = None) -> list[str]:
+    """Enable sounddevice's ASIO-enabled PortAudio DLL when requested.
+
+    ``sounddevice`` selects its PortAudio DLL while the module is imported, so the
+    environment variable must be set before the GUI imports any code that imports
+    sounddevice. ``--asio`` is deliberately opt-in because sounddevice ships a
+    non-ASIO DLL by default for compatibility. ``NAM_ENABLE_ASIO=1`` provides the same
+    behavior for launchers that cannot pass command-line options.
+    """
+    platform = _sys.platform if platform is None else platform
+    args = list(argv)
+    requested = "--asio" in args or _os.environ.get("NAM_ENABLE_ASIO") == "1"
+    if platform == "win32" and requested:
+        _os.environ["SD_ENABLE_ASIO"] = "1"
+        args = [arg for arg in args if arg != "--asio"]
+    return args
+
+
 def main() -> None:
     """Launch the normal GUI after installing the device-list compatibility shim."""
+    _sys.argv[:] = configure_asio(_sys.argv)
+
     from . import main as _gui
 
     _gui.duplex_devices = logical_duplex_devices

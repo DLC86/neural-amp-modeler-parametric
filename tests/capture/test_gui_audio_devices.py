@@ -1,4 +1,5 @@
 from nam.capture.audio import DeviceInfo
+from nam.capture.gui.launcher import configure_asio
 from nam.capture.gui.launcher import logical_duplex_devices
 
 
@@ -45,3 +46,43 @@ def test_logical_duplex_devices_does_not_pair_different_host_apis():
     ]
 
     assert logical_duplex_devices(devices) == []
+
+
+def test_configure_asio_is_opt_in_on_windows(monkeypatch):
+    monkeypatch.delenv("SD_ENABLE_ASIO", raising=False)
+    monkeypatch.delenv("NAM_ENABLE_ASIO", raising=False)
+
+    args = configure_asio(["nam-capture"], platform="win32")
+
+    assert args == ["nam-capture"]
+    assert "SD_ENABLE_ASIO" not in __import__("os").environ
+
+
+def test_configure_asio_removes_flag_and_enables_portaudio(monkeypatch):
+    monkeypatch.delenv("SD_ENABLE_ASIO", raising=False)
+    monkeypatch.delenv("NAM_ENABLE_ASIO", raising=False)
+
+    args = configure_asio(["nam-capture", "--asio"], platform="win32")
+
+    assert args == ["nam-capture"]
+    assert __import__("os").environ["SD_ENABLE_ASIO"] == "1"
+
+
+def test_configure_asio_environment_switch(monkeypatch):
+    monkeypatch.setenv("NAM_ENABLE_ASIO", "1")
+    monkeypatch.delenv("SD_ENABLE_ASIO", raising=False)
+
+    args = configure_asio(["nam-capture"], platform="win32")
+
+    assert args == ["nam-capture"]
+    assert __import__("os").environ["SD_ENABLE_ASIO"] == "1"
+
+
+def test_configure_asio_is_ignored_off_windows(monkeypatch):
+    monkeypatch.delenv("SD_ENABLE_ASIO", raising=False)
+    monkeypatch.delenv("NAM_ENABLE_ASIO", raising=False)
+
+    args = configure_asio(["nam-capture", "--asio"], platform="linux")
+
+    assert args == ["nam-capture", "--asio"]
+    assert "SD_ENABLE_ASIO" not in __import__("os").environ
