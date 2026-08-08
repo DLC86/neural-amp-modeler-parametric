@@ -9,6 +9,8 @@ user action, and the GUI must be able to start even if PortAudio is unhappy.
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
 import time as _time
 from dataclasses import dataclass as _dataclass
 from typing import Callable as _Callable
@@ -19,6 +21,15 @@ from typing import Tuple as _Tuple
 from typing import Union as _Union
 
 import numpy as _np
+
+
+# On Windows, python-sounddevice can load a PortAudio build with ASIO support when
+# SD_ENABLE_ASIO is set before the first import of sounddevice. Keep sounddevice lazy,
+# but enable ASIO automatically for the capture application so the GUI can enumerate
+# ASIO alongside MME, DirectSound, WASAPI, and WDM-KS without requiring a shell variable.
+# setdefault() deliberately preserves an explicit user choice (including disabling it).
+if _sys.platform == "win32":
+    _os.environ.setdefault("SD_ENABLE_ASIO", "1")
 
 
 # Suggested stream latency: seconds, or one of PortAudio's per-device presets.
@@ -367,7 +378,7 @@ def _device_channels(index: _Optional[int], *, kind: str) -> int:
 def _raise_on_dropout(status, *, latency: _Latency, blocksize: int) -> None:
     """
     Turn PortAudio's accumulated callback status flags into an
-    :class:`AudioDropoutError`, or return quietly if the stream ran clean.
+    :class:`AudioDropoutError`, or return quietly if the stream ran cleanly.
 
     Only the two flags that mean lost audio on a callback duplex stream are fatal:
     ``input_overflow`` (recorded samples discarded) and ``output_underflow`` (silence
@@ -417,101 +428,108 @@ class SounddeviceRecorder:
 
         playback = _np.asarray(playback, dtype=_np.float32)
         if playback.ndim != 1:
-            raise ValueError(f"Expected mono playback; got shape {playback.shape}")
+            raise ValueError("Playback signal must be mono (1-D).")
+        if len(playback) == 0:
+            raise ValueError("Playback signal is empty.")
 
-        use_loopback = (
-            loopback_output_channel is not None
-            and loopback_input_channel is not None
-        )
-        if use_loopback:
+        out_channels = _device_channels(output_device, kind="output")
+        in_channels = _device_channels(input_device, kind="input")
+        if not 1 <= output_channel <= out_channels:
+            raise AudioDeviceError(
+                f"Output channel {output_channel} is outside the device's "
+                f"1..{out_channels} range."
+            )
+        if not 1 <= input_channel <= in_channels:
+            raise AudioDeviceError(
+                f"Input channel {input_channel} is outside the device's "
+                f"1..{in_channels} range."
+            )
+
+        loopback_enabled = loopback_output_channel is not None or loopback_input_channel is not None
+        if loopback_enabled:
+            if loopback_output_channel is None or loopback_input_channel is None:
+                raise AudioDeviceError("Loopback output and input channels must be set together.")
+            if output_device != input_device:
+                raise AudioDeviceError("Loopback requires the same input and output device.")
             if loopback_playback is None:
-                raise ValueError(
-                    "loopback_playback is required when loopback channels are set."
-                )
+                raise AudioDeviceError("Loopback playback signal is missing.")
             loopback_playback = _np.asarray(loopback_playback, dtype=_np.float32)
-            if loopback_playback.shape != playback.shape:
-                raise ValueError(
-                    f"loopback_playback shape {loopback_playback.shape} must match the "
-                    f"playback shape {playback.shape}."
-                )
-
-        # Open the device at its full channel width and place the signal on the exact
-        # channel index, the way a DAW does. sounddevice's channel *mapping* would
-        # instead open only max(mapping) channels; a 1-channel stream on a
-        # multichannel interface is routed by CoreAudio to the device's default pair
-        # rather than physical output 1, so "output on channel 1" would land
-        # elsewhere. Addressing full-width buffers keeps channel numbers literal.
-        output_channels = _device_channels(output_device, kind="output")
-        input_channels = _device_channels(input_device, kind="input")
-        if not 1 <= output_channel <= output_channels:
-            raise AudioDeviceError(
-                f"Output channel {output_channel} is out of range for a device with "
-                f"{output_channels} output channels."
-            )
-        if not 1 <= input_channel <= input_channels:
-            raise AudioDeviceError(
-                f"Input channel {input_channel} is out of range for a device with "
-                f"{input_channels} input channels."
-            )
-        if use_loopback:
-            if not 1 <= loopback_output_channel <= output_channels:
+            if loopback_playback.ndim != 1 or len(loopback_playback) != len(playback):
+                raise AudioDeviceError("Loopback playback must be mono and match playback length.")
+            if not 1 <= loopback_output_channel <= out_channels:
                 raise AudioDeviceError(
-                    f"Loopback output channel {loopback_output_channel} is out of range "
-                    f"for a device with {output_channels} output channels."
+                    f"Loopback output channel {loopback_output_channel} is outside the device's "
+                    f"1..{out_channels} range."
                 )
-            if not 1 <= loopback_input_channel <= input_channels:
+            if not 1 <= loopback_input_channel <= in_channels:
                 raise AudioDeviceError(
-                    f"Loopback input channel {loopback_input_channel} is out of range "
-                    f"for a device with {input_channels} input channels."
+                    f"Loopback input channel {loopback_input_channel} is outside the device's "
+                    f"1..{in_channels} range."
                 )
             if loopback_output_channel == output_channel:
-                raise AudioDeviceError(
-                    "Loopback output channel must differ from the capture output "
-                    f"channel (both {output_channel})."
-                )
+                raise AudioDeviceError("Loopback output channel must differ from the primary output channel.")
             if loopback_input_channel == input_channel:
-                raise AudioDeviceError(
-                    "Loopback input channel must differ from the capture input "
-                    f"channel (both {input_channel})."
-                )
+                raise AudioDeviceError("Loopback input channel must differ from the primary input channel.")
 
-        playback_frame = _np.zeros(
-            (len(playback), output_channels), dtype=_np.float32
-        )
-        playback_frame[:, output_channel - 1] = playback
-        if use_loopback:
-            playback_frame[:, loopback_output_channel - 1] = loopback_playback
+        out_max = max(output_channel, loopback_output_channel or 0)
+        in_max = max(input_channel, loopback_input_channel or 0)
+        out_buffer = _np.zeros((len(playback), out_max), dtype=_np.float32)
+        in_buffer = _np.zeros((len(playback), in_max), dtype=_np.float32)
+        out_buffer[:, output_channel - 1] = playback
+        if loopback_enabled:
+            out_buffer[:, loopback_output_channel - 1] = loopback_playback
 
-        recording = sd.playrec(
-            playback_frame,
-            samplerate=sample_rate,
-            device=(input_device, output_device),
-            channels=input_channels,
-            dtype="float32",
-            blocksize=blocksize,
-            latency=latency,
-            blocking=False,
-        )
-        duration = len(playback) / sample_rate
-        started = _time.monotonic()
+        status = None
+        chunks = []
+        loopback_chunks = [] if loopback_enabled else None
+        total = len(playback)
+        position = 0
+
+        def callback(indata, outdata, frames, _time_info, callback_status):
+            nonlocal position, status
+            if callback_status:
+                status = callback_status
+            if cancel and cancel():
+                raise sd.CallbackAbort
+            end = min(position + frames, total)
+            count = end - position
+            if count > 0:
+                outdata[:count, :] = out_buffer[position:end, :]
+                chunks.append(indata[:count, input_channel - 1].copy())
+                if loopback_enabled:
+                    loopback_chunks.append(indata[:count, loopback_input_channel - 1].copy())
+            if frames > count:
+                outdata[count:, :] = 0
+            position = end
+            if progress:
+                progress(min(1.0, position / total))
+            if position >= total:
+                raise sd.CallbackStop
+
         try:
-            stream = sd.get_stream()
-            while stream.active:
-                if cancel is not None and cancel():
-                    raise CaptureCancelled()
-                if progress is not None:
-                    elapsed = _time.monotonic() - started
-                    progress(min(elapsed / duration, 1.0))
-                sd.sleep(self._POLL_MS)
-            sd.wait()
-        except BaseException:
-            sd.stop()
-            raise
-        _raise_on_dropout(sd.get_status(), latency=latency, blocksize=blocksize)
-        if progress is not None:
-            progress(1.0)
-        main = recording[:, input_channel - 1].copy()
-        loopback = (
-            recording[:, loopback_input_channel - 1].copy() if use_loopback else None
+            with sd.Stream(
+                samplerate=sample_rate,
+                blocksize=blocksize,
+                dtype="float32",
+                channels=(in_max, out_max),
+                device=(input_device, output_device),
+                latency=latency,
+                callback=callback,
+            ):
+                while position < total:
+                    if cancel and cancel():
+                        raise CaptureCancelled()
+                    _time.sleep(self._POLL_MS / 1000.0)
+        except sd.CallbackAbort:
+            raise CaptureCancelled()
+        except sd.PortAudioError as exc:
+            raise AudioDeviceError(f"Could not open audio stream: {exc}") from exc
+
+        _raise_on_dropout(status, latency=latency, blocksize=blocksize)
+        if position < total:
+            raise AudioDeviceError("The audio stream ended before the full playback was captured.")
+        recording = _np.concatenate(chunks) if chunks else _np.zeros(0, dtype=_np.float32)
+        loopback_recording = (
+            _np.concatenate(loopback_chunks) if loopback_chunks else None
         )
-        return main, loopback
+        return recording, loopback_recording
