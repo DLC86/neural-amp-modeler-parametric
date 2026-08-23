@@ -105,6 +105,20 @@ class ConcatLSTM(_ParametricNet):
     def receptive_field(self) -> int:
         return 1
 
+    @property
+    def training_warmup(self) -> int:
+        # The burn-in is only taken on the truncated-BPTT path; without a truncation
+        # length the whole window is scored and nothing is detached.
+        if self._train_truncate is None or self._train_burn_in is None:
+            return 0
+        return self._train_burn_in
+
+    @property
+    def supports_param_trajectory(self) -> bool:
+        # The encoded controls are concatenated onto the audio at every timestep, so a
+        # value that moves within the window needs no special handling.
+        return True
+
     def _run_conditioned(self, x: _torch.Tensor, p: _torch.Tensor) -> _torch.Tensor:
         if p.ndim == 1:
             p = p[None].expand(x.shape[0], -1)
@@ -114,7 +128,7 @@ class ConcatLSTM(_ParametricNet):
             )
 
         length = x.shape[1]
-        p_t = p[:, None, :].expand(-1, length, -1)
+        p_t = p if p.ndim == 3 else p[:, None, :].expand(-1, length, -1)
         seq = _torch.cat([x[..., None], p_t], dim=-1)
         last_hidden_state = self._initial_state(len(x))
         if not self.training or self._train_truncate is None:
