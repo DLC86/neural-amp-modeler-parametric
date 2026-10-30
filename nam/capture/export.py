@@ -22,10 +22,11 @@ from .project import CONCAT_LEARNING_CONFIG_FILENAME
 from .project import CONCAT_MODEL_CONFIG_FILENAME
 from .project import HYPER_LEARNING_CONFIG_FILENAME
 from .project import HYPER_MODEL_CONFIG_FILENAME
+from .project import HYPER_A2_MODEL_CONFIG_FILENAME
+from .project import HYPER_A2_LEARNING_CONFIG_FILENAME
 from .project import CaptureProject
 from .project import DATA_FILENAME
 from .project import atomic_write_json as _atomic_write_json
-
 
 # Active-learning defaults, adapted from PANAMA's LSTM recipe for the short single-file
 # dataset used here. Batch 37 (matching the best-generalizing prior runs -- the small-batch
@@ -239,6 +240,16 @@ def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
     }
 
 
+def build_hyper_a2_model_config(project: CaptureProject) -> dict[str, _Any]:
+    """Both official A2 widths, with one shared capture/knob definition."""
+    model = build_hyper_model_config(project)
+    config = model["net"]["config"]
+    del config["layers"]
+    config["size"] = "full"
+    model["net"]["name"] = "HyperA2"
+    return model
+
+
 def build_hyper_model_config(project: CaptureProject) -> dict[str, _Any]:
     config: dict[str, _Any] = {
         "layers": [
@@ -436,5 +447,17 @@ def write_hyper_training_configs(
     model_path = project_dir / HYPER_MODEL_CONFIG_FILENAME
     learning_path = project_dir / HYPER_LEARNING_CONFIG_FILENAME
     _atomic_write_json(model_path, build_hyper_model_config(project))
+    _atomic_write_json(learning_path, build_hyper_learning_config(project))
+    return [model_path, learning_path]
+
+
+def write_hyper_a2_training_configs(
+    project: CaptureProject, project_dir: _Path
+) -> list[_Path]:
+    """Write a dual-size A2 model and matching parametric learning settings."""
+    project_dir = _Path(project_dir)
+    model_path = project_dir / HYPER_A2_MODEL_CONFIG_FILENAME
+    learning_path = project_dir / HYPER_A2_LEARNING_CONFIG_FILENAME
+    _atomic_write_json(model_path, build_hyper_a2_model_config(project))
     _atomic_write_json(learning_path, build_hyper_learning_config(project))
     return [model_path, learning_path]

@@ -53,6 +53,7 @@ from ..audio import reports_current_sample_rate as _reports_current_sample_rate
 from ..export import update_data_json as _update_data_json
 from ..export import write_concat_training_configs as _write_concat_training_configs
 from ..export import write_hyper_training_configs as _write_hyper_training_configs
+from ..export import write_hyper_a2_training_configs as _write_hyper_a2_training_configs
 from ..params import KnobSpec as _KnobSpec
 from ..params import validate_knobs as _validate_knobs
 from ..planner import corner_capture_count as _corner_capture_count
@@ -756,8 +757,12 @@ class MainWindow(_QMainWindow):
         self.export_hyper_button = _QPushButton("Export HyperWaveNet Configs")
         self.export_hyper_button.clicked.connect(self._on_export_hyper_configs)
         self.export_hyper_button.setVisible(self._enable_hyperwavenet)
+        self.export_hyper_a2_button = _QPushButton("Export HyperA2 Full + Lite Configs")
+        self.export_hyper_a2_button.clicked.connect(self._on_export_hyper_a2_configs)
+        self.export_hyper_a2_button.setVisible(self._enable_hyperwavenet)
         export_buttons.addWidget(self.export_concat_button)
         export_buttons.addWidget(self.export_hyper_button)
+        export_buttons.addWidget(self.export_hyper_a2_button)
         layout.addLayout(export_buttons)
         return widget
 
@@ -1950,6 +1955,9 @@ class MainWindow(_QMainWindow):
 
     def _on_export_hyper_configs(self) -> None:
         self._export_configs("HyperWaveNet", _write_hyper_training_configs)
+
+    def _on_export_hyper_a2_configs(self) -> None:
+        self._export_configs("HyperA2", _write_hyper_a2_training_configs)
 
     def _export_configs(self, architecture: str, writer) -> None:
         if self.project is None or self.project_dir is None:

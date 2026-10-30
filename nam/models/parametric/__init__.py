@@ -27,12 +27,14 @@ from ._concat_lstm import ConcatLSTM
 from ._concat_wavenet import ConcatWaveNet
 from ._hypernet import Hypernetwork
 from ._hyperwavenet import HyperWaveNet
+from ._hyper_a2 import HyperA2
 from ._spec import ParamSpec
 
 _register_dataset_initializer("parametric", _init_dataset)
 _factory.register("ConcatLSTM", ConcatLSTM.init_from_config)
 _factory.register("ConcatWaveNet", ConcatWaveNet.init_from_config)
 _factory.register("HyperWaveNet", HyperWaveNet.init_from_config)
+_factory.register("HyperA2", HyperA2.init_from_config)
 
 __all__ = [
     "abbreviate_param_names",
@@ -43,6 +45,7 @@ __all__ = [
     "format_param_value",
     "Hypernetwork",
     "HyperWaveNet",
+    "HyperA2",
     "make_capture_y_path",
     "ParamSpec",
     "ParametricDataset",

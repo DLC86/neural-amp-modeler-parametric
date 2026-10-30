@@ -27,6 +27,7 @@ from nam.data import get_joint_dataset_hooks as _get_joint_dataset_hooks
 from nam.data import init_dataset as _init_dataset
 from nam.models.exportable import Exportable as _Exportable
 from nam.models.parametric import HyperWaveNet as _HyperWaveNet
+from nam.models.parametric import HyperA2 as _HyperA2
 from nam.models.parametric import ParametricDataset as _ParametricDataset
 from nam.models.parametric import ParametricNet as _ParametricNet
 from nam.models.parametric._anchors import anchor_output as _anchor_output
@@ -268,7 +269,7 @@ def _enable_training_fast_paths(
     dataloaders, so `_release_training_fast_paths` takes it back once fitting is over and
     later calls (bake, export checks) go through the general path.
     """
-    if isinstance(net, _HyperWaveNet):
+    if isinstance(net, (_HyperWaveNet, _HyperA2)):
         net.set_uniform_batch_params(
             all(
                 isinstance(dataloader.batch_sampler, _CaptureBatchSampler)
@@ -281,7 +282,7 @@ def _enable_training_fast_paths(
 
 
 def _release_training_fast_paths(net: _ParametricNet) -> None:
-    if isinstance(net, _HyperWaveNet):
+    if isinstance(net, (_HyperWaveNet, _HyperA2)):
         net.set_uniform_batch_params(False)
     net.set_compiled(False)
     net.set_validate_params(True)
@@ -847,29 +848,56 @@ class _ParametricLightningModule(_LightningModule):
 
     def on_train_epoch_start(self):
         self._train_metrics = _EpochMetrics()
+        self._train_size_metrics = {}
+
+    def _size_steps(self, batch):
+        if isinstance(self.net, _HyperA2):
+            for size in self.net.sizes:
+                with self.net.using_size(size):
+                    result = self._shared_step(batch)
+                yield size, result
+        else:
+            yield None, self._shared_step(batch)
 
     def training_step(self, batch, batch_idx):
-        preds, targets, loss_dict = self._shared_step(batch)
-        loss = _torch.zeros((), device=preds.device)
-        for v in loss_dict.values():
-            if v.weight is not None and v.weight > 0.0:
-                if v.value is None:
-                    raise RuntimeError("Weighted training losses must define a tensor value")
-                loss = loss + v.weight * v.value
         capture_index = self._capture_index(self._train_capture_sampler, batch_idx)
-        self._train_metrics.update(preds, targets, _bucket_means(loss_dict), capture_index)
-        return loss
+        losses = []
+        for size, (preds, targets, loss_dict) in self._size_steps(batch):
+            loss = _torch.zeros((), device=preds.device)
+            for v in loss_dict.values():
+                if v.weight is not None and v.weight > 0.0:
+                    if v.value is None:
+                        raise RuntimeError(
+                            "Weighted training losses must define a tensor value"
+                        )
+                    loss = loss + v.weight * v.value
+            losses.append(loss)
+            means = _bucket_means(loss_dict)
+            self._train_metrics.update(preds, targets, means, capture_index)
+            if size is not None:
+                self._train_size_metrics.setdefault(size, _EpochMetrics()).update(
+                    preds, targets, means, capture_index
+                )
+        return _torch.stack(losses).mean()
 
     def on_train_epoch_end(self):
         self._log_bucket(self._train_metrics.compute(), _TRAIN_BUCKET)
+        for size, metrics in self._train_size_metrics.items():
+            self._log_bucket(metrics.compute(), f"{_TRAIN_BUCKET}/{size}")
 
     def on_validation_epoch_start(self):
         self._val_metrics = _EpochMetrics()
+        self._val_size_metrics = {}
 
     def validation_step(self, batch, batch_idx):
-        preds, targets, loss_dict = self._shared_step(batch)
         capture_index = self._capture_index(self._val_capture_sampler, batch_idx)
-        self._val_metrics.update(preds, targets, _bucket_means(loss_dict), capture_index)
+        for size, (preds, targets, loss_dict) in self._size_steps(batch):
+            means = _bucket_means(loss_dict)
+            self._val_metrics.update(preds, targets, means, capture_index)
+            if size is not None:
+                self._val_size_metrics.setdefault(size, _EpochMetrics()).update(
+                    preds, targets, means, capture_index
+                )
         # Reduction happens once in on_validation_epoch_end; nothing to return.
 
     def on_validation_epoch_end(self):
@@ -877,6 +905,8 @@ class _ParametricLightningModule(_LightningModule):
         if not metrics:
             return
         self._log_bucket(metrics, _VALIDATION_BUCKET)
+        for size, size_metrics in self._val_size_metrics.items():
+            self._log_bucket(size_metrics.compute(), f"{_VALIDATION_BUCKET}/{size}")
         val_loss_key = self._val_loss_key()
         if val_loss_key not in metrics:
             raise RuntimeError(
@@ -929,6 +959,10 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
         try:
             if isinstance(net, _HyperWaveNet):
                 _bake(net, net.nominal_params, output_scale=self._output_scale).export(
+                    outdir, basename=basename
+                )
+            elif isinstance(net, _HyperA2):
+                net.bake(net.nominal_params, output_scale=self._output_scale).export(
                     outdir, basename=basename
                 )
             _export_parametric(
@@ -1202,6 +1236,8 @@ def main(
                 net.nominal_params,
                 output_scale=output_scale,
             ).export(outdir)
+        elif isinstance(net, _HyperA2):
+            net.bake(net.nominal_params, output_scale=output_scale).export(outdir)
         _export_parametric(
             net,
             outdir,

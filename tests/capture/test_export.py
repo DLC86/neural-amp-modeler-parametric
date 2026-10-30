@@ -46,6 +46,23 @@ def _project(**kwargs):
     return _new_project(_knobs(), **defaults)
 
 
+def test_hyper_a2_configs_keep_project_controls_and_both_sizes(tmp_path):
+    from nam.capture.export import write_hyper_a2_training_configs
+    from nam.models.parametric import HyperA2
+
+    project = _project()
+    paths = write_hyper_a2_training_configs(project, tmp_path)
+    assert [p.name for p in paths] == ["model_hyper_a2.json", "learning_hyper_a2.json"]
+    model_config = _json.loads(paths[0].read_text())
+    assert model_config["net"]["name"] == "HyperA2"
+    model = HyperA2.init_from_config(model_config["net"]["config"])
+    assert model.param_names == ("Gain", "Tone")
+    assert model.sizes == ("lite", "full")
+    assert model.receptive_field == 6347
+    learning = _json.loads(paths[1].read_text())
+    assert learning == _build_hyper_learning_config(project)
+
+
 def test_build_data_config_includes_only_captured_entries():
     project = _project()
     train_entry = project.entries_for_split("train")[0]

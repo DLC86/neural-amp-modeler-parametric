@@ -119,6 +119,14 @@ itself. ConcatWaveNet runs produce only `model_parametric.nam`.
 
 ### Which architecture?
 
+`HyperA2` adds both official A2 audio sizes (Full: 8 channels, Lite: 3 channels)
+to the HyperWaveNet conditioning approach, with unchanged A2 layers, kernels and
+dilations. Launch `nam-capture --hyperwavenet` and choose **Export HyperA2 Full + Lite
+Configs**, or use `nam_full_configs/parametric/model_hyper_a2.json`. See
+[HyperA2 training, size selection and export](docs/hyper_a2.md). Its parametric
+file requires a HyperA2-aware runtime; the accompanying baked `model.nam` is a
+normal fixed-setting A2 Full/Lite container.
+
 ConcatWaveNet is the default. HyperWaveNet generates its weights whenever the knob values change,
 and audible zippering can show up in the plugin during those transitions with no fix yet — so its
 export button is hidden behind `nam-capture --hyperwavenet` until that's sorted out.
