@@ -35,6 +35,7 @@ for the filter.
 from __future__ import annotations
 
 import json as _json
+import math as _math
 import os as _os
 import tempfile as _tempfile
 from dataclasses import dataclass as _dataclass
@@ -60,11 +61,11 @@ from .planner import RAW_MANIFEST_FILENAME as _RAW_MANIFEST_FILENAME
 from .project import CaptureEntryModel as _CaptureEntryModel
 from .project import CaptureProject as _CaptureProject
 from .project import QAModel as _QAModel
+from .project import DATA_FILENAME as _DATA_FILENAME
 from .project import atomic_write_json as _atomic_write_json
 from .project import find_clearable_entries as _find_clearable_entries
 from .project import mark_captured as _mark_captured
 from .project import save_project as _save_project
-
 
 # The parametric dataset refuses clipped output outright (nam.data
 # _validate_inputs_after_processing raises at abs(y).max() >= 1.0), so a clipping QA
@@ -108,10 +109,17 @@ TAIL_SECONDS = 0.5
 # resolvable below a sample, where a threshold crossing moves with amplitude -- which is
 # what let one bad capture take a project's timebase with it.
 #
-# The cost: 3.4 is a property of the converter, so one whose response spreads further
-# would be labelled fractionally late. ``CaptureSession._qa`` checks each capture against
-# its own onset and says so, rather than leaving it to be found in a soft-sounding model.
+# Four samples is only the initial margin, not a property shared by all converters.
+# CaptureSession._ensure_alignment_margin widens it from a reliable clean loopback
+# and rebases every existing label together. The fractional alignment stays per-capture.
 ALIGNMENT_LEAD_SAMPLES = 4.0
+# A clean converter impulse can spread well beyond four samples. Learn a larger
+# lead only from agreeing loopback blips, and do not auto-adopt implausibly large
+# offsets (a dropout or a false detection must remain a QA failure).
+MAX_AUTOMATIC_ALIGNMENT_LEAD_SAMPLES = 256
+_TIMING_MARGIN_WARNING = (
+    "This capture's response starts before the point it's timed from"
+)
 # Past this a legacy ``alignment_reference`` is not a converter's offset but a broken
 # measurement -- a first capture whose blips disagreed writes exactly that -- and
 # reproducing its timebase would inherit the fault. Above any plausible converter, well
@@ -168,7 +176,11 @@ def alignment_lead(project: _CaptureProject) -> float:
     :meth:`CaptureSession._alignment_lead` when unusable *and* describing nothing.
     """
     recorded = recorded_lead(project)
-    return ALIGNMENT_LEAD_SAMPLES if recorded is None else recorded
+    if recorded is not None:
+        return recorded
+    if project.alignment_lead_samples is not None:
+        return project.alignment_lead_samples
+    return ALIGNMENT_LEAD_SAMPLES
 
 
 def has_captures(project: _CaptureProject, project_dir: _Path) -> bool:
@@ -815,7 +827,7 @@ class CaptureSession:
         one bad measurement into every remaining capture.
         """
         if self.project.alignment_reference is None:
-            return ALIGNMENT_LEAD_SAMPLES
+            return alignment_lead(self.project)
         recorded = recorded_lead(self.project)
         if recorded is not None:
             return recorded
@@ -827,6 +839,99 @@ class CaptureSession:
         # refused, or the project would be permanently uncapturable with no way out.
         self.project.alignment_reference = None
         return ALIGNMENT_LEAD_SAMPLES
+
+    def _ensure_alignment_margin(self, latency: _LatencyResult, lead: float) -> float:
+        """Clear the measured onset while keeping every capture on one timebase.
+
+        Widen by an INTEGER and subtract the same integer from all saved labels.
+        Thus delay - shift - peak changes equally for all captures; neither the WAVs
+        nor their sub-sample phase need modifying. Never change only the next label.
+        """
+        if (
+            not latency.ok
+            or latency.peak_delay is None
+            or latency.delay is None
+            # Legacy projects explicitly preserve another timebase, including files
+            # whose labels predate the raw manifest. Keep that migration separate.
+            or self.project.alignment_reference is not None
+        ):
+            return lead
+        required = latency.peak_delay - latency.delay
+        if not _math.isfinite(required) or required <= lead + 1e-9:
+            return lead
+        # One extra sample of headroom beyond the calibrator's recommended onset.
+        increase = int(_math.ceil(required + 1.0 - lead))
+        new_lead = lead + increase
+        if new_lead > MAX_AUTOMATIC_ALIGNMENT_LEAD_SAMPLES:
+            return lead
+
+        # Pending WAVs can be restored with labels from data.json. Resolve that state
+        # first instead of silently dropping their labels when rebuilding the dataset.
+        captured_paths = {entry.y_path for entry in self.project.captured_entries()}
+        if any(
+            entry.status != "captured" and (self.project_dir / entry.y_path).is_file()
+            for entry in self.project.entries
+        ):
+            raise CaptureSessionError(
+                "Restore the captures already on disk before calibrating the audio "
+                "interface's timing margin, so their delay labels stay aligned too."
+            )
+        data_path = self.project_dir / _DATA_FILENAME
+        previous_data = None
+        if data_path.is_file():
+            previous_data = _json.loads(data_path.read_text())
+            for split in ("train", "validation"):
+                for item in previous_data.get(split, []):
+                    path = item.get("y_path")
+                    if (
+                        path
+                        and path not in captured_paths
+                        and (self.project_dir / path).is_file()
+                    ):
+                        raise CaptureSessionError(
+                            "Restore the previous capture plan before calibrating the "
+                            "timing margin: data.json still references its recordings."
+                        )
+
+        previous_lead = self.project.alignment_lead_samples
+        previous_entries = [
+            (entry, entry.delay, entry.qa.model_copy(deep=True) if entry.qa else None)
+            for entry in self.project.captured_entries()
+        ]
+        try:
+            for entry, delay, _ in previous_entries:
+                if delay is not None:
+                    entry.delay = delay - increase
+                if entry.qa is not None:
+                    onset = entry.qa.loopback_delay
+                    shifted_label = (
+                        None
+                        if entry.delay is None
+                        else entry.delay - (entry.qa.subsample_shift or 0.0)
+                    )
+                    if (
+                        onset is not None
+                        and shifted_label is not None
+                        and shifted_label <= onset
+                    ):
+                        entry.qa.messages = [
+                            message
+                            for message in entry.qa.messages
+                            if not message.startswith(_TIMING_MARGIN_WARNING)
+                        ]
+            self.project.alignment_lead_samples = new_lead
+            _save_project(self.project, self.project_dir)
+            _update_data_json(self.project, self.project_dir)
+        except Exception:
+            # A failed write must not leave the live project on a different lead.
+            self.project.alignment_lead_samples = previous_lead
+            for entry, delay, qa in previous_entries:
+                entry.delay, entry.qa = delay, qa
+            _save_project(self.project, self.project_dir)
+            if previous_data is not None:
+                _atomic_write_json(data_path, previous_data)
+            raise
+        return new_lead
 
     @staticmethod
     def _alignment(
@@ -973,6 +1078,8 @@ class CaptureSession:
             # fix the loopback patch or uncheck it before this entry can be captured.
             raise CaptureSessionError(LOOPBACK_NOT_DETECTED_MESSAGE)
         loopback_used = loopback is not None
+        if loopback_used:
+            lead = self._ensure_alignment_margin(latency, lead)
         delay, shift = self._alignment(latency, loopback_used, lead)
         y = self._aligned_target(main, preamble, len(x), shift)
 
@@ -1173,10 +1280,17 @@ class CaptureSession:
         # else's hardware, so it is checked against this capture's own independently
         # detected onset rather than trusted -- otherwise a converter that rings longer
         # would quietly produce targets that start before the input they are paired with.
-        if loopback_used and delay is not None and latency.delay is not None:
-            if delay > latency.delay:
+        if (
+            loopback_used
+            and latency.ok
+            and delay is not None
+            and latency.delay is not None
+        ):
+            # The label belongs to the shifted target, while onset is measured in
+            # the raw recording. Compare in the same frame to avoid rounding alerts.
+            if delay - alignment_shift > latency.delay + 1e-9:
                 messages.append(
-                    "This capture's response starts before the point it's timed from "
+                    f"{_TIMING_MARGIN_WARNING} "
                     f"({latency.delay} against {delay} samples), which can soften the "
                     "model. Your audio interface needs a bigger timing margin than the "
                     "app allows for -- please report this."

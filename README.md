@@ -36,6 +36,10 @@ The conda environment installs the package itself; the second line adds PySide6 
 
 ## Capture
 
+The capture app now adapts its timing margin to a reliable clean loopback,
+instead of assuming every interface needs the same four-sample margin.
+See [the response-before-reference warning and timing correction](docs/capture_timing_margin.md).
+
 ```bash
 nam-capture
 ```

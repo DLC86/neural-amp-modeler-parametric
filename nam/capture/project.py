@@ -276,6 +276,12 @@ class CaptureProject(_BaseModel):
     # whether the project currently has captures, and CaptureSession._alignment_lead for
     # the rejection of a value too large to be a converter's offset.
     alignment_reference: _Optional[float] = None
+    # Hardware-specific pre-peak margin, calibrated from a clean loopback. Increasing
+    # it rebases ALL existing delay labels by the same integer; WAVs and fractional
+    # shifts stay unchanged. Separate from the legacy, potentially corrupt reference.
+    alignment_lead_samples: _Optional[float] = _Field(
+        default=None, gt=0, allow_inf_nan=False
+    )
     # The capture app version this project was created under, stamped once at creation and
     # carried forward unchanged (including when the plan is regenerated) -- it dates the
     # project, not the last thing to touch it. ``None`` means the project was created
@@ -520,6 +526,7 @@ def clear_captures(project: CaptureProject, project_dir: _Path) -> list[str]:
         entry.stream_config = None
         notes.append(f"{entry.y_path}: cleared.")
     project.alignment_reference = None
+    project.alignment_lead_samples = None
     return notes
 
 

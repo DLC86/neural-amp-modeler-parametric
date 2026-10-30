@@ -38,6 +38,114 @@ from nam.data import wav_to_np as _wav_to_np
 _RATE = 48_000
 
 
+class _WideImpulseRecorder:
+    """A clean interface with onset 3818 and a response peak 12 samples later."""
+
+    def playrec(self, playback, sample_rate, **kwargs):
+        kernel = _np.zeros(13, dtype=_np.float32)
+        kernel[0], kernel[12] = 0.02, 1.0
+
+        def returned(signal, gain):
+            shifted = _np.zeros_like(signal)
+            shifted[3818:] = signal[:-3818] * gain
+            return _np.convolve(shifted, kernel)[: len(signal)].astype(_np.float32)
+
+        loopback = kwargs.get("loopback_playback")
+        return returned(playback, 0.5), (
+            None if loopback is None else returned(loopback, 1.0)
+        )
+
+
+def test_wide_interface_impulse_calibrates_margin_instead_of_warning(tmp_path):
+    project_dir = _make_project_dir(tmp_path)
+    project = _load_project(project_dir)
+    _enable_loopback(project)
+    session = _CaptureSession(project, project_dir, recorder=_WideImpulseRecorder())
+    entry = project.pending_entries()[0]
+    qa = session.capture_entry(entry)
+
+    # Reproduce the screenshot's two readings: onset-based recommendation 3817,
+    # while the stock peak-minus-four calculation would label it 3826.
+    assert qa.loopback_delay == 3817
+    assert round(qa.peak_delay - 4) == 3826
+    assert project.alignment_lead_samples == 14
+    assert entry.delay == 3816
+    assert not any("starts before" in message for message in qa.messages)
+    assert _load_project(project_dir).alignment_lead_samples == 14
+    session.capture_entry(project.pending_entries()[0])
+    assert _audit_problems(_audit_captures(project, project_dir)) == []
+
+
+def test_widening_margin_relabels_existing_captures_without_touching_audio(
+    tmp_path, monkeypatch
+):
+    project_dir = _make_project_dir(tmp_path)
+    project = _load_project(project_dir)
+    _enable_loopback(project)
+    session = _CaptureSession(project, project_dir, recorder=_WideImpulseRecorder())
+    first = project.pending_entries()[0]
+    with monkeypatch.context() as patch:
+        # Simulate a capture written by the stock version with the four-sample lead.
+        patch.setattr(session, "_ensure_alignment_margin", lambda latency, lead: lead)
+        session.capture_entry(first)
+    assert first.delay == 3826
+    assert any("starts before" in message for message in first.qa.messages)
+    original_wav = (project_dir / first.y_path).read_bytes()
+    original_shift = first.qa.subsample_shift
+    session.capture_entry(project.pending_entries()[0])
+
+    assert first.delay == 3816
+    assert first.qa.subsample_shift == original_shift
+    assert (project_dir / first.y_path).read_bytes() == original_wav
+    assert not any("starts before" in message for message in first.qa.messages)
+    data = _json.loads((project_dir / "data.json").read_text())
+    labels = {item["y_path"]: item["delay"] for item in data["train"]}
+    assert labels[first.y_path] == 3816
+    assert _audit_problems(_audit_captures(project, project_dir)) == []
+
+
+def test_unreliable_blips_never_recalibrate_the_margin(tmp_path):
+    from nam.capture.latency import LatencyResult
+
+    project_dir = _make_project_dir(tmp_path)
+    project = _load_project(project_dir)
+    session = _CaptureSession(project, project_dir, recorder=_WideImpulseRecorder())
+    latency = LatencyResult(
+        delay=3817,
+        detected=True,
+        disagreement_too_high=True,
+        safety_factor=1,
+        peak_delay=3830.0,
+    )
+    assert session._ensure_alignment_margin(latency, 4.0) == 4.0
+    assert project.alignment_lead_samples is None
+
+
+def test_margin_calibration_write_failure_rolls_back_old_labels(tmp_path, monkeypatch):
+    from nam.capture import session as session_module
+
+    project_dir = _make_project_dir(tmp_path)
+    project = _load_project(project_dir)
+    _enable_loopback(project)
+    session = _CaptureSession(project, project_dir, recorder=_WideImpulseRecorder())
+    first = project.pending_entries()[0]
+    with monkeypatch.context() as patch:
+        patch.setattr(session, "_ensure_alignment_margin", lambda latency, lead: lead)
+        session.capture_entry(first)
+    old_data = _json.loads((project_dir / "data.json").read_text())
+
+    def fail(*args):
+        raise OSError("test write failure")
+
+    monkeypatch.setattr(session_module, "_update_data_json", fail)
+    with _pytest.raises(OSError, match="test write failure"):
+        session.capture_entry(project.pending_entries()[0])
+    assert project.alignment_lead_samples is None
+    assert first.delay == 3826
+    assert _load_project(project_dir).alignment_lead_samples is None
+    assert _json.loads((project_dir / "data.json").read_text()) == old_data
+
+
 class _FakeRecorder:
     """
     Pretends to be an amp on a loop with a fixed round-trip delay: attenuates the
@@ -929,7 +1037,10 @@ def test_a_captures_alignment_does_not_depend_on_what_was_captured_before(tmp_pa
         session.capture_entry(entries[0])
         session._recorder = _DriftingRecorder(480, drift=0.25)
         session.capture_entry(entries[1])
-        return _timebase(entries[1])
+        # A hardware margin is an arbitrary project-wide integer offset. Compare
+        # the measured clock after removing that offset, so a bad first capture
+        # still cannot poison any later capture's fractional alignment.
+        return _timebase(entries[1]) + session._alignment_lead()
 
     after_good = timebase_of_second_entry(
         _make_project_dir(tmp_path / "good"), _DriftingRecorder(480)
@@ -1050,6 +1161,8 @@ def test_the_legacy_bound_is_the_boundary(tmp_path):
     session = _CaptureSession(project, project_dir, recorder=_DriftingRecorder(480))
     # The reference only applies while there are captures written against it.
     session.capture_entry(project.pending_entries()[0])
+    # Simulate a file created before hardware-margin calibration existed.
+    project.alignment_lead_samples = None
 
     project.alignment_reference = _MAX_LEGACY_REFERENCE
     assert session._alignment_lead() == _MAX_LEGACY_REFERENCE

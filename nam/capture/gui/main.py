@@ -1414,6 +1414,7 @@ class MainWindow(_QMainWindow):
             # must survive it too. Dropping it left the files on one lead and every later
             # capture on the constant, with nothing recording the difference.
             project.alignment_reference = self.project.alignment_reference
+            project.alignment_lead_samples = self.project.alignment_lead_samples
 
         project.include_initial_corners = self.include_corners_check.isChecked()
         corner_note = ""
