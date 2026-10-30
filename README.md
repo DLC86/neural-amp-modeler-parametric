@@ -36,6 +36,14 @@ The conda environment installs the package itself; the second line adds PySide6 
 
 ## Capture
 
+The Project tab can save optional input/output level calibration in dBu at
+0 dBFS. The trainer carries the standard `input_level_dbu` and `output_level_dbu`
+metadata into final models and checkpoint exports. See [level calibration](docs/level_calibration.md).
+
+The capture app now adapts its timing margin to a reliable clean loopback,
+instead of assuming every interface needs the same four-sample margin.
+See [the response-before-reference warning and timing correction](docs/capture_timing_margin.md).
+
 ```bash
 nam-capture
 ```
@@ -118,6 +126,14 @@ for A/B'ing your parametric model against a conventional one, but it is not the 
 itself. ConcatWaveNet runs produce only `model_parametric.nam`.
 
 ### Which architecture?
+
+`HyperA2` adds both official A2 audio sizes (Full: 8 channels, Lite: 3 channels)
+to the HyperWaveNet conditioning approach, with unchanged A2 layers, kernels and
+dilations. Launch `nam-capture --hyperwavenet` and choose **Export HyperA2 Full + Lite
+Configs**, or use `nam_full_configs/parametric/model_hyper_a2.json`. See
+[HyperA2 training, size selection and export](docs/hyper_a2.md). Its parametric
+file requires a HyperA2-aware runtime; the accompanying baked `model.nam` is a
+normal fixed-setting A2 Full/Lite container.
 
 ConcatWaveNet is the default. HyperWaveNet generates its weights whenever the knob values change,
 and audible zippering can show up in the plugin during those transitions with no fix yet — so its

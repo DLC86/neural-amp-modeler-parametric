@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QCheckBox as _QCheckBox
 from PySide6.QtWidgets import QComboBox as _QComboBox
 from PySide6.QtWidgets import QDialog as _QDialog
 from PySide6.QtWidgets import QDialogButtonBox as _QDialogButtonBox
+from PySide6.QtWidgets import QDoubleSpinBox as _QDoubleSpinBox
 from PySide6.QtWidgets import QFileDialog as _QFileDialog
 from PySide6.QtWidgets import QFormLayout as _QFormLayout
 from PySide6.QtWidgets import QLineEdit as _QLineEdit
@@ -53,6 +54,7 @@ from ..audio import reports_current_sample_rate as _reports_current_sample_rate
 from ..export import update_data_json as _update_data_json
 from ..export import write_concat_training_configs as _write_concat_training_configs
 from ..export import write_hyper_training_configs as _write_hyper_training_configs
+from ..export import write_hyper_a2_training_configs as _write_hyper_a2_training_configs
 from ..params import KnobSpec as _KnobSpec
 from ..params import validate_knobs as _validate_knobs
 from ..planner import corner_capture_count as _corner_capture_count
@@ -80,7 +82,6 @@ from ..session import LOOPBACK_NOT_DETECTED_MESSAGE as _LOOPBACK_NOT_DETECTED_ME
 from ..session import timebase_problem as _timebase_problem
 from .workers import CancelToken as _CancelToken
 from .workers import SessionWorker as _SessionWorker
-
 
 _PLAN_COLUMNS = ("Split", "Index", "Params", "Filename", "Status", "Delay", "QA")
 
@@ -292,9 +293,7 @@ def duplex_devices(devices: _Sequence[_DeviceInfo]) -> list[_DeviceInfo]:
     ]
 
 
-def no_duplex_devices_message(
-    devices: _Sequence[_DeviceInfo], platform: str
-) -> str:
+def no_duplex_devices_message(devices: _Sequence[_DeviceInfo], platform: str) -> str:
     """
     What to tell the user when the device picker has nothing to offer, or "" when it
     does. Takes the *full* device list, because what is missing is the diagnosis.
@@ -485,10 +484,72 @@ class MainWindow(_QMainWindow):
         buttons.addWidget(open_button)
         layout.addLayout(buttons)
 
+        calibration = _QFormLayout()
+        for kind, label, tooltip in (
+            (
+                "input",
+                "Input level",
+                "Analog level at the device input produced by 0 dBFS playback through your reamp path.",
+            ),
+            (
+                "output",
+                "Output level",
+                "Analog level at the recording input corresponding to 0 dBFS in the recorded WAV.",
+            ),
+        ):
+            row = _QHBoxLayout()
+            known = _QCheckBox("Known")
+            spin = _QDoubleSpinBox()
+            spin.setRange(-60.0, 60.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" dBu")
+            spin.setValue(12.0)
+            spin.setToolTip(tooltip)
+            known.setToolTip(
+                "Leave unchecked when the calibration has not been measured."
+            )
+            row.addWidget(known)
+            row.addWidget(spin)
+            setattr(self, f"{kind}_calibration_known", known)
+            setattr(self, f"{kind}_calibration_spin", spin)
+            known.toggled.connect(self._save_calibration)
+            spin.valueChanged.connect(self._save_calibration)
+            calibration.addRow(f"{label} at 0 dBFS", row)
+        layout.addLayout(calibration)
+
         self.project_log = _QPlainTextEdit()
         self.project_log.setReadOnly(True)
         layout.addWidget(self.project_log)
         return widget
+
+    def _save_calibration(self, *_args) -> None:
+        if self.project is None or self.project_dir is None:
+            return
+        for kind in ("input", "output"):
+            known = getattr(self, f"{kind}_calibration_known")
+            spin = getattr(self, f"{kind}_calibration_spin")
+            spin.setEnabled(known.isChecked())
+            setattr(
+                self.project,
+                f"{kind}_level_dbu",
+                spin.value() if known.isChecked() else None,
+            )
+        _save_project(self.project, self.project_dir)
+
+    def _refresh_calibration(self) -> None:
+        for kind in ("input", "output"):
+            known = getattr(self, f"{kind}_calibration_known")
+            spin = getattr(self, f"{kind}_calibration_spin")
+            value = getattr(self.project, f"{kind}_level_dbu") if self.project else None
+            known.blockSignals(True)
+            spin.blockSignals(True)
+            known.setChecked(value is not None)
+            spin.setValue(12.0 if value is None else value)
+            known.blockSignals(False)
+            spin.blockSignals(False)
+            known.setEnabled(self.project is not None)
+            spin.setEnabled(self.project is not None and value is not None)
 
     def _build_knobs_tab(self) -> _QWidget:
         widget = _QWidget()
@@ -500,7 +561,7 @@ class MainWindow(_QMainWindow):
         )
         self.knob_table.setToolTip(
             'Tick "Avoid zero" for gain/drive knobs so no capture sets them to zero '
-            "(the nearest non-zero grid value is used instead). Tick \"Gain/Drive\" on "
+            '(the nearest non-zero grid value is used instead). Tick "Gain/Drive" on '
             "the one gain/drive knob (optional) so the initial corner captures sweep it "
             "separately from the EQ knobs."
         )
@@ -694,9 +755,7 @@ class MainWindow(_QMainWindow):
         self.loopback_output_channel_spin.valueChanged.connect(
             self._save_audio_settings
         )
-        self.loopback_input_channel_spin.valueChanged.connect(
-            self._save_audio_settings
-        )
+        self.loopback_input_channel_spin.valueChanged.connect(self._save_audio_settings)
         self.buffer_size_combo.currentIndexChanged.connect(self._save_audio_settings)
         self.latency_combo.currentIndexChanged.connect(self._save_audio_settings)
         self._update_loopback_enabled_state()
@@ -756,8 +815,12 @@ class MainWindow(_QMainWindow):
         self.export_hyper_button = _QPushButton("Export HyperWaveNet Configs")
         self.export_hyper_button.clicked.connect(self._on_export_hyper_configs)
         self.export_hyper_button.setVisible(self._enable_hyperwavenet)
+        self.export_hyper_a2_button = _QPushButton("Export HyperA2 Full + Lite Configs")
+        self.export_hyper_a2_button.clicked.connect(self._on_export_hyper_a2_configs)
+        self.export_hyper_a2_button.setVisible(self._enable_hyperwavenet)
         export_buttons.addWidget(self.export_concat_button)
         export_buttons.addWidget(self.export_hyper_button)
+        export_buttons.addWidget(self.export_hyper_a2_button)
         layout.addLayout(export_buttons)
         return widget
 
@@ -940,9 +1003,7 @@ class MainWindow(_QMainWindow):
         )
         self.project_log.appendPlainText(f"New project folder: {project_dir}")
         if recorded:
-            self.project_log.appendPlainText(
-                f"Using input WAVs: {', '.join(recorded)}"
-            )
+            self.project_log.appendPlainText(f"Using input WAVs: {', '.join(recorded)}")
         else:
             self.project_log.appendPlainText(
                 "No input WAVs set yet -- add them to the project folder before "
@@ -1184,7 +1245,9 @@ class MainWindow(_QMainWindow):
             or 1
         )
         self._apply_n_train_recommendation()
-        self.n_validation_spin.setValue(len(self.project.entries_for_split("validation")))
+        self.n_validation_spin.setValue(
+            len(self.project.entries_for_split("validation"))
+        )
         self._apply_n_validation_recommendation()
         self.seed_spin.setValue(self.project.seed)
         self.include_corners_check.setChecked(self.project.include_initial_corners)
@@ -1238,7 +1301,10 @@ class MainWindow(_QMainWindow):
                     if row == item.row():
                         continue
                     other = self.knob_table.item(row, 5)
-                    if other is not None and other.checkState() == _Qt.CheckState.Checked:
+                    if (
+                        other is not None
+                        and other.checkState() == _Qt.CheckState.Checked
+                    ):
                         other.setCheckState(_Qt.CheckState.Unchecked)
             finally:
                 self.knob_table.blockSignals(False)
@@ -1351,8 +1417,7 @@ class MainWindow(_QMainWindow):
             for col in (4, 5):
                 item = self.knob_table.item(row, col)
                 values.append(
-                    item is not None
-                    and item.checkState() == _Qt.CheckState.Checked
+                    item is not None and item.checkState() == _Qt.CheckState.Checked
                 )
             rows.append(tuple(values))
         return rows
@@ -1409,6 +1474,9 @@ class MainWindow(_QMainWindow):
             # must survive it too. Dropping it left the files on one lead and every later
             # capture on the constant, with nothing recording the difference.
             project.alignment_reference = self.project.alignment_reference
+            project.alignment_lead_samples = self.project.alignment_lead_samples
+            project.input_level_dbu = self.project.input_level_dbu
+            project.output_level_dbu = self.project.output_level_dbu
 
         project.include_initial_corners = self.include_corners_check.isChecked()
         corner_note = ""
@@ -1538,9 +1606,7 @@ class MainWindow(_QMainWindow):
         except Exception as exc:
             self._devices = []
             self.project_log.appendPlainText(f"Could not list audio devices: {exc}")
-        self._populate_device_combo(
-            self.device_combo, duplex_devices(self._devices)
-        )
+        self._populate_device_combo(self.device_combo, duplex_devices(self._devices))
         message = no_duplex_devices_message(self._devices, _sys.platform)
         self.no_devices_label.setText(message)
         self.no_devices_label.setVisible(bool(message))
@@ -1616,9 +1682,7 @@ class MainWindow(_QMainWindow):
         self.loopback_check.setChecked(audio.loopback_enabled)
         self.loopback_check.blockSignals(False)
         self.loopback_output_channel_spin.blockSignals(True)
-        self.loopback_output_channel_spin.setValue(
-            audio.loopback_output_channel or 1
-        )
+        self.loopback_output_channel_spin.setValue(audio.loopback_output_channel or 1)
         self.loopback_output_channel_spin.blockSignals(False)
         self.loopback_input_channel_spin.blockSignals(True)
         self.loopback_input_channel_spin.setValue(audio.loopback_input_channel or 1)
@@ -1857,7 +1921,9 @@ class MainWindow(_QMainWindow):
             return
         entry = self._next_pending_entry()
         if entry is None:
-            _QMessageBox.information(self, "Nothing pending", "All captures are complete.")
+            _QMessageBox.information(
+                self, "Nothing pending", "All captures are complete."
+            )
             return
         self._begin_capture(entry)
 
@@ -1931,9 +1997,7 @@ class MainWindow(_QMainWindow):
         for message in qa.messages:
             self.capture_log.appendPlainText(f"QA: {message}")
         if qa.messages:
-            _QMessageBox.warning(
-                self, "Capture QA warnings", "\n".join(qa.messages)
-            )
+            _QMessageBox.warning(self, "Capture QA warnings", "\n".join(qa.messages))
         self._refresh_all()
 
     def _on_capture_failure(self, message: str) -> None:
@@ -1950,6 +2014,9 @@ class MainWindow(_QMainWindow):
 
     def _on_export_hyper_configs(self) -> None:
         self._export_configs("HyperWaveNet", _write_hyper_training_configs)
+
+    def _on_export_hyper_a2_configs(self) -> None:
+        self._export_configs("HyperA2", _write_hyper_a2_training_configs)
 
     def _export_configs(self, architecture: str, writer) -> None:
         if self.project is None or self.project_dir is None:
@@ -2038,7 +2105,9 @@ class MainWindow(_QMainWindow):
         if text:
             self.al_log.appendPlainText(text.rstrip("\n"))
 
-    def _on_al_finished(self, exit_code: int, exit_status: _QProcess.ExitStatus) -> None:
+    def _on_al_finished(
+        self, exit_code: int, exit_status: _QProcess.ExitStatus
+    ) -> None:
         self._al_process = None
         self.al_start_button.setEnabled(not getattr(_sys, "frozen", False))
         self.generate_plan_button.setEnabled(True)
@@ -2121,7 +2190,9 @@ class MainWindow(_QMainWindow):
             _QMessageBox.warning(self, "No project", "Open or create a project first.")
             return
         message = self._import_al_proposals()
-        self.al_log.appendPlainText(message or "No new active-learning proposals to import.")
+        self.al_log.appendPlainText(
+            message or "No new active-learning proposals to import."
+        )
         self._refresh_all()
 
     def _on_al_export_runner_files(self) -> None:
@@ -2263,6 +2334,7 @@ class MainWindow(_QMainWindow):
     # -- refresh -----------------------------------------------------------
 
     def _refresh_all(self) -> None:
+        self._refresh_calibration()
         self._refresh_plan_tables()
         self._refresh_next_entry_label()
         self._refresh_status_bar()

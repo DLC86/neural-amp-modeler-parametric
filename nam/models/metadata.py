@@ -10,6 +10,7 @@ from enum import Enum as _Enum
 from typing import Optional as _Optional
 
 from pydantic import BaseModel as _BaseModel
+from pydantic import Field as _Field
 
 
 # Note: if you change this enum, you need to update the options in easy_colab.ipynb!
@@ -63,5 +64,5 @@ class UserMetadata(_BaseModel):
     gear_make: _Optional[str] = None
     gear_model: _Optional[str] = None
     tone_type: _Optional[ToneType] = None
-    input_level_dbu: _Optional[float] = None
-    output_level_dbu: _Optional[float] = None
+    input_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)
+    output_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)

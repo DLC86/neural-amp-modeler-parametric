@@ -1,0 +1,29 @@
+{
+    "_notes": [
+        "HyperA2 trains both official A2 widths (Lite=3, Full=8) on the same captures.",
+        "Both keep the stock 23 layers, kernel sizes, dilations and 16-tap head.",
+        "Full/Lite selects audio width; hypernet.mode selects delta parameterization.",
+        "Replace these example controls with the controls used in data.json."
+    ],
+    "net": {
+        "name": "HyperA2",
+        "config": {
+            "size": "full",
+            "head_scale": 0.01,
+            "params": [
+                {"name": "Gain", "type": "continuous", "min": 0, "max": 10, "default": 5},
+                {"name": "Tone", "type": "continuous", "min": 0, "max": 10, "default": 5}
+            ],
+            "hypernet": {
+                "hidden_sizes": [16],
+                "activation": "LeakyReLU",
+                "mode": "low_rank",
+                "rank": 2,
+                "selector": {"exclude_suffixes": ["_conv.weight"]}
+            }
+        }
+    },
+    "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
+    "optimizer": {"lr": 0.002, "weight_decay": 3.17e-07},
+    "lr_scheduler": {"class": "ExponentialLR", "kwargs": {"gamma": 0.994}}
+}

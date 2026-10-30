@@ -46,6 +46,55 @@ def _project(**kwargs):
     return _new_project(_knobs(), **defaults)
 
 
+def test_hyper_a2_configs_keep_project_controls_and_both_sizes(tmp_path):
+    from nam.capture.export import write_hyper_a2_training_configs
+    from nam.models.parametric import HyperA2
+
+    project = _project()
+    paths = write_hyper_a2_training_configs(project, tmp_path)
+    assert [p.name for p in paths] == ["model_hyper_a2.json", "learning_hyper_a2.json"]
+    model_config = _json.loads(paths[0].read_text())
+    assert model_config["net"]["name"] == "HyperA2"
+    model = HyperA2.init_from_config(model_config["net"]["config"])
+    assert model.param_names == ("Gain", "Tone")
+    assert model.sizes == ("lite", "full")
+    assert model.receptive_field == 6347
+    learning = _json.loads(paths[1].read_text())
+    assert learning == _build_hyper_learning_config(project)
+
+
+def test_level_calibration_is_optional_and_exported_for_every_architecture(tmp_path):
+    from nam.capture.export import build_hyper_a2_model_config
+    from nam.capture.project import load_project, save_project
+    from pydantic import ValidationError
+
+    project = _project()
+    for builder in (
+        _build_concat_model_config,
+        _build_hyper_model_config,
+        build_hyper_a2_model_config,
+    ):
+        assert "metadata" not in builder(project)
+    project.input_level_dbu = 18.0
+    project.output_level_dbu = 12.5
+    save_project(project, tmp_path)
+    restored = load_project(tmp_path)
+    assert restored.input_level_dbu == 18.0 and restored.output_level_dbu == 12.5
+    for builder in (
+        _build_concat_model_config,
+        _build_hyper_model_config,
+        build_hyper_a2_model_config,
+    ):
+        assert builder(restored)["metadata"] == {
+            "input_level_dbu": 18.0,
+            "output_level_dbu": 12.5,
+        }
+    invalid = project.model_dump()
+    invalid["input_level_dbu"] = float("nan")
+    with _pytest.raises(ValidationError):
+        type(project).model_validate(invalid)
+
+
 def test_build_data_config_includes_only_captured_entries():
     project = _project()
     train_entry = project.entries_for_split("train")[0]

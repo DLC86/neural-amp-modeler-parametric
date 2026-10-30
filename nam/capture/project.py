@@ -42,6 +42,8 @@ CONCAT_MODEL_CONFIG_FILENAME = "model_concat.json"
 CONCAT_LEARNING_CONFIG_FILENAME = "learning_concat.json"
 HYPER_MODEL_CONFIG_FILENAME = "model_hyper.json"
 HYPER_LEARNING_CONFIG_FILENAME = "learning_hyper.json"
+HYPER_A2_MODEL_CONFIG_FILENAME = "model_hyper_a2.json"
+HYPER_A2_LEARNING_CONFIG_FILENAME = "learning_hyper_a2.json"
 
 _PROJECT_VERSION = 1
 # Keep every window below one ConcatLSTM processing block (65535 samples) and above the
@@ -244,6 +246,8 @@ class CaptureProject(_BaseModel):
     train_input: str = "input_train.wav"
     validation_input: str = "input_validation.wav"
     sample_rate: _Optional[int] = None
+    input_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)
+    output_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)
     train_window: WindowModel = _Field(default_factory=WindowModel)
     validation_window: WindowModel = _Field(
         default_factory=lambda: WindowModel(ny=317270)
@@ -274,6 +278,12 @@ class CaptureProject(_BaseModel):
     # whether the project currently has captures, and CaptureSession._alignment_lead for
     # the rejection of a value too large to be a converter's offset.
     alignment_reference: _Optional[float] = None
+    # Hardware-specific pre-peak margin, calibrated from a clean loopback. Increasing
+    # it rebases ALL existing delay labels by the same integer; WAVs and fractional
+    # shifts stay unchanged. Separate from the legacy, potentially corrupt reference.
+    alignment_lead_samples: _Optional[float] = _Field(
+        default=None, gt=0, allow_inf_nan=False
+    )
     # The capture app version this project was created under, stamped once at creation and
     # carried forward unchanged (including when the plan is regenerated) -- it dates the
     # project, not the last thing to touch it. ``None`` means the project was created
@@ -518,6 +528,7 @@ def clear_captures(project: CaptureProject, project_dir: _Path) -> list[str]:
         entry.stream_config = None
         notes.append(f"{entry.y_path}: cleared.")
     project.alignment_reference = None
+    project.alignment_lead_samples = None
     return notes
 
 

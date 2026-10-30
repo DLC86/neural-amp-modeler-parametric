@@ -22,10 +22,11 @@ from .project import CONCAT_LEARNING_CONFIG_FILENAME
 from .project import CONCAT_MODEL_CONFIG_FILENAME
 from .project import HYPER_LEARNING_CONFIG_FILENAME
 from .project import HYPER_MODEL_CONFIG_FILENAME
+from .project import HYPER_A2_MODEL_CONFIG_FILENAME
+from .project import HYPER_A2_LEARNING_CONFIG_FILENAME
 from .project import CaptureProject
 from .project import DATA_FILENAME
 from .project import atomic_write_json as _atomic_write_json
-
 
 # Active-learning defaults, adapted from PANAMA's LSTM recipe for the short single-file
 # dataset used here. Batch 37 (matching the best-generalizing prior runs -- the small-batch
@@ -204,6 +205,15 @@ def _training_param_specs(project: CaptureProject) -> list[dict[str, _Any]]:
     return params
 
 
+def _calibration_metadata(project: CaptureProject) -> dict[str, _Any]:
+    metadata = {
+        key: value
+        for key in ("input_level_dbu", "output_level_dbu")
+        if (value := getattr(project, key)) is not None
+    }
+    return {"metadata": metadata} if metadata else {}
+
+
 def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
     # input_size/condition_size are omitted on purpose: ConcatWaveNet derives them from
     # the param specs.
@@ -225,6 +235,7 @@ def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
     if project.sample_rate is not None:
         config["sample_rate"] = float(project.sample_rate)
     return {
+        **_calibration_metadata(project),
         "net": {"name": "ConcatWaveNet", "config": config},
         "loss": {
             "val_loss": "esr",
@@ -237,6 +248,16 @@ def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
         "optimizer": {"lr": 0.003, "weight_decay": 3.17e-07},
         "lr_scheduler": {"class": "ExponentialLR", "kwargs": {"gamma": 0.994}},
     }
+
+
+def build_hyper_a2_model_config(project: CaptureProject) -> dict[str, _Any]:
+    """Both official A2 widths, with one shared capture/knob definition."""
+    model = build_hyper_model_config(project)
+    config = model["net"]["config"]
+    del config["layers"]
+    config["size"] = "full"
+    model["net"]["name"] = "HyperA2"
+    return model
 
 
 def build_hyper_model_config(project: CaptureProject) -> dict[str, _Any]:
@@ -264,6 +285,7 @@ def build_hyper_model_config(project: CaptureProject) -> dict[str, _Any]:
     if project.sample_rate is not None:
         config["sample_rate"] = float(project.sample_rate)
     return {
+        **_calibration_metadata(project),
         "net": {"name": "HyperWaveNet", "config": config},
         "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
         "optimizer": {"lr": 0.002, "weight_decay": 3.17e-07},
@@ -436,5 +458,17 @@ def write_hyper_training_configs(
     model_path = project_dir / HYPER_MODEL_CONFIG_FILENAME
     learning_path = project_dir / HYPER_LEARNING_CONFIG_FILENAME
     _atomic_write_json(model_path, build_hyper_model_config(project))
+    _atomic_write_json(learning_path, build_hyper_learning_config(project))
+    return [model_path, learning_path]
+
+
+def write_hyper_a2_training_configs(
+    project: CaptureProject, project_dir: _Path
+) -> list[_Path]:
+    """Write a dual-size A2 model and matching parametric learning settings."""
+    project_dir = _Path(project_dir)
+    model_path = project_dir / HYPER_A2_MODEL_CONFIG_FILENAME
+    learning_path = project_dir / HYPER_A2_LEARNING_CONFIG_FILENAME
+    _atomic_write_json(model_path, build_hyper_a2_model_config(project))
     _atomic_write_json(learning_path, build_hyper_learning_config(project))
     return [model_path, learning_path]

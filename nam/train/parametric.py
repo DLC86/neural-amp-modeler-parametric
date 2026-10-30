@@ -26,7 +26,9 @@ from nam.data import apply_joint_dataset_hooks as _apply_joint_dataset_hooks
 from nam.data import get_joint_dataset_hooks as _get_joint_dataset_hooks
 from nam.data import init_dataset as _init_dataset
 from nam.models.exportable import Exportable as _Exportable
+from nam.models.metadata import UserMetadata as _UserMetadata
 from nam.models.parametric import HyperWaveNet as _HyperWaveNet
+from nam.models.parametric import HyperA2 as _HyperA2
 from nam.models.parametric import ParametricDataset as _ParametricDataset
 from nam.models.parametric import ParametricNet as _ParametricNet
 from nam.models.parametric._anchors import anchor_output as _anchor_output
@@ -268,7 +270,7 @@ def _enable_training_fast_paths(
     dataloaders, so `_release_training_fast_paths` takes it back once fitting is over and
     later calls (bake, export checks) go through the general path.
     """
-    if isinstance(net, _HyperWaveNet):
+    if isinstance(net, (_HyperWaveNet, _HyperA2)):
         net.set_uniform_batch_params(
             all(
                 isinstance(dataloader.batch_sampler, _CaptureBatchSampler)
@@ -281,7 +283,7 @@ def _enable_training_fast_paths(
 
 
 def _release_training_fast_paths(net: _ParametricNet) -> None:
-    if isinstance(net, _HyperWaveNet):
+    if isinstance(net, (_HyperWaveNet, _HyperA2)):
         net.set_uniform_batch_params(False)
     net.set_compiled(False)
     net.set_validate_params(True)
@@ -847,29 +849,56 @@ class _ParametricLightningModule(_LightningModule):
 
     def on_train_epoch_start(self):
         self._train_metrics = _EpochMetrics()
+        self._train_size_metrics = {}
+
+    def _size_steps(self, batch):
+        if isinstance(self.net, _HyperA2):
+            for size in self.net.sizes:
+                with self.net.using_size(size):
+                    result = self._shared_step(batch)
+                yield size, result
+        else:
+            yield None, self._shared_step(batch)
 
     def training_step(self, batch, batch_idx):
-        preds, targets, loss_dict = self._shared_step(batch)
-        loss = _torch.zeros((), device=preds.device)
-        for v in loss_dict.values():
-            if v.weight is not None and v.weight > 0.0:
-                if v.value is None:
-                    raise RuntimeError("Weighted training losses must define a tensor value")
-                loss = loss + v.weight * v.value
         capture_index = self._capture_index(self._train_capture_sampler, batch_idx)
-        self._train_metrics.update(preds, targets, _bucket_means(loss_dict), capture_index)
-        return loss
+        losses = []
+        for size, (preds, targets, loss_dict) in self._size_steps(batch):
+            loss = _torch.zeros((), device=preds.device)
+            for v in loss_dict.values():
+                if v.weight is not None and v.weight > 0.0:
+                    if v.value is None:
+                        raise RuntimeError(
+                            "Weighted training losses must define a tensor value"
+                        )
+                    loss = loss + v.weight * v.value
+            losses.append(loss)
+            means = _bucket_means(loss_dict)
+            self._train_metrics.update(preds, targets, means, capture_index)
+            if size is not None:
+                self._train_size_metrics.setdefault(size, _EpochMetrics()).update(
+                    preds, targets, means, capture_index
+                )
+        return _torch.stack(losses).mean()
 
     def on_train_epoch_end(self):
         self._log_bucket(self._train_metrics.compute(), _TRAIN_BUCKET)
+        for size, metrics in self._train_size_metrics.items():
+            self._log_bucket(metrics.compute(), f"{_TRAIN_BUCKET}/{size}")
 
     def on_validation_epoch_start(self):
         self._val_metrics = _EpochMetrics()
+        self._val_size_metrics = {}
 
     def validation_step(self, batch, batch_idx):
-        preds, targets, loss_dict = self._shared_step(batch)
         capture_index = self._capture_index(self._val_capture_sampler, batch_idx)
-        self._val_metrics.update(preds, targets, _bucket_means(loss_dict), capture_index)
+        for size, (preds, targets, loss_dict) in self._size_steps(batch):
+            means = _bucket_means(loss_dict)
+            self._val_metrics.update(preds, targets, means, capture_index)
+            if size is not None:
+                self._val_size_metrics.setdefault(size, _EpochMetrics()).update(
+                    preds, targets, means, capture_index
+                )
         # Reduction happens once in on_validation_epoch_end; nothing to return.
 
     def on_validation_epoch_end(self):
@@ -877,6 +906,8 @@ class _ParametricLightningModule(_LightningModule):
         if not metrics:
             return
         self._log_bucket(metrics, _VALIDATION_BUCKET)
+        for size, size_metrics in self._val_size_metrics.items():
+            self._log_bucket(size_metrics.compute(), f"{_VALIDATION_BUCKET}/{size}")
         val_loss_key = self._val_loss_key()
         if val_loss_key not in metrics:
             raise RuntimeError(
@@ -909,9 +940,12 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
     that require reloading through the training code to recover a model.
     """
 
-    def __init__(self, *args, output_scale: _Optional[float] = None, **kwargs):
+    def __init__(
+        self, *args, output_scale: _Optional[float] = None, user_metadata=None, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self._output_scale = output_scale
+        self._user_metadata = user_metadata
 
     def _nam_stem(self, filepath: str) -> str:
         if not filepath.endswith(self.FILE_EXTENSION):
@@ -929,13 +963,18 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
         try:
             if isinstance(net, _HyperWaveNet):
                 _bake(net, net.nominal_params, output_scale=self._output_scale).export(
-                    outdir, basename=basename
+                    outdir, basename=basename, user_metadata=self._user_metadata
+                )
+            elif isinstance(net, _HyperA2):
+                net.bake(net.nominal_params, output_scale=self._output_scale).export(
+                    outdir, basename=basename, user_metadata=self._user_metadata
                 )
             _export_parametric(
                 net,
                 outdir,
                 basename=f"{basename}_parametric",
                 output_scale=self._output_scale,
+                user_metadata=self._user_metadata,
             )
         except NotImplementedError:
             # Defensive: nothing to checkpoint here if a future ParametricNet subclass
@@ -953,7 +992,7 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
 
 
 def _create_parametric_checkpoint_callbacks(
-    learning_config, output_scale: _Optional[float] = None
+    learning_config, output_scale: _Optional[float] = None, user_metadata=None
 ):
     """
     Same checkpoint cadence/naming as ``nam.train.full._create_callbacks(packed=False)``,
@@ -976,12 +1015,14 @@ def _create_parametric_checkpoint_callbacks(
         save_top_k=3,
         monitor="val_loss",
         output_scale=output_scale,
+        user_metadata=user_metadata,
         **kwargs,
     )
     checkpoint_epoch = _ParametricModelCheckpoint(
         filename="checkpoint_epoch_{epoch:04d}",
         every_n_epochs=1,
         output_scale=output_scale,
+        user_metadata=user_metadata,
     )
     callbacks = [checkpoint_best]
     if not validate_inside_epoch:
@@ -990,6 +1031,7 @@ def _create_parametric_checkpoint_callbacks(
     checkpoint_last = _ParametricModelCheckpoint(
         filename="checkpoint_last_{epoch:04d}_{step}",
         output_scale=output_scale,
+        user_metadata=user_metadata,
         **kwargs,
     )
     callbacks.extend([checkpoint_last, checkpoint_epoch])
@@ -997,9 +1039,11 @@ def _create_parametric_checkpoint_callbacks(
 
 
 def _create_parametric_callbacks(
-    learning_config, output_scale: _Optional[float] = None
+    learning_config, output_scale: _Optional[float] = None, user_metadata=None
 ):
-    callbacks = _create_parametric_checkpoint_callbacks(learning_config, output_scale)
+    callbacks = _create_parametric_checkpoint_callbacks(
+        learning_config, output_scale, user_metadata
+    )
     threshold_esr = learning_config.get("threshold_esr")
     if threshold_esr is not None:
         callbacks.append(
@@ -1088,6 +1132,8 @@ def main(
     no_show: bool = False,
     make_plots=True,
 ):
+    raw_metadata = model_config.get("metadata")
+    user_metadata = _UserMetadata.model_validate(raw_metadata) if raw_metadata else None
     if not outdir.exists():
         raise RuntimeError(f"No output location found at {outdir}")
     for basename, config in (
@@ -1143,7 +1189,9 @@ def main(
         (train_dataloader, val_dataloader),
         learning_config.get("torch_compile", {}),
     )
-    callbacks = _create_parametric_callbacks(learning_config, output_scale)
+    callbacks = _create_parametric_callbacks(
+        learning_config, output_scale, user_metadata
+    )
     trainer = _pl.Trainer(
         callbacks=callbacks,
         default_root_dir=outdir,
@@ -1201,12 +1249,17 @@ def main(
                 net,
                 net.nominal_params,
                 output_scale=output_scale,
-            ).export(outdir)
+            ).export(outdir, user_metadata=user_metadata)
+        elif isinstance(net, _HyperA2):
+            net.bake(net.nominal_params, output_scale=output_scale).export(
+                outdir, user_metadata=user_metadata
+            )
         _export_parametric(
             net,
             outdir,
             basename="model_parametric",
             output_scale=output_scale,
+            user_metadata=user_metadata,
         )
     finally:
         dataset_train.teardown()

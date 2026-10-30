@@ -26,9 +26,23 @@ from ._concat_wavenet import ConcatWaveNet as _ConcatWaveNet
 from ._dataset import ParametricDataset as _ParametricDataset
 from ._dataset import resolve_named_params as _resolve_named_params
 from ._hyperwavenet import HyperWaveNet as _HyperWaveNet
+from ._hyper_a2 import HyperA2 as _HyperA2
 
 _RawParams = _Mapping[str, _Any] | _Sequence[float] | _torch.Tensor
 _Settings = _Mapping[str, _RawParams] | _Sequence[tuple[str, _RawParams]]
+
+
+class _HyperA2ScaleOutputHook(_Dataset._ScaleOutputHook):
+    def apply(self, model_dict: dict):
+        if model_dict["architecture"] != "HyperA2":
+            return super().apply(model_dict)
+        model_dict["config"]["head_scale"] *= self.scale
+        for entry in model_dict["config"]["submodels"]:
+            entry["config"]["head_scale"] *= self.scale
+            slot = entry["weight_offset"] + entry["base_weight_count"] - 1
+            model_dict["weights"][slot] *= self.scale
+        self._adjust_metadata_loudness(model_dict)
+        return model_dict
 
 
 class _HyperWaveNetScaleOutputHook(_Dataset._ScaleOutputHook):
@@ -230,6 +244,8 @@ def bake_to_files(
 def _make_parametric_scale_hook(
     model: _ParametricNet, scale: float
 ) -> _Dataset._ScaleOutputHook:
+    if isinstance(model, _HyperA2):
+        return _HyperA2ScaleOutputHook(scale=scale)
     if isinstance(model, _HyperWaveNet):
         return _HyperWaveNetScaleOutputHook(
             scale=scale,
