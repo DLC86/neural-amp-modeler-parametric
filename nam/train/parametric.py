@@ -1231,19 +1231,10 @@ def main(
         model.eval()
         net.sample_rate = getattr(dataset_train, "sample_rate", None)
         _handshake_datasets(model, dataset_train, dataset_validation)
-        if make_plots:
-            _plot_parametric(
-                model,
-                dataset_validation,
-                savefig=_Path(outdir, "comparison.png"),
-                window_start=100_000,
-                window_end=110_000,
-                show=False,
-            )
-            _plot_parametric(model, dataset_validation, show=not no_show)
-
-        # Baking a fixed-setting stock WaveNet snapshot is a HyperWaveNet-only feature;
-        # other parametric nets (e.g. ConcatWaveNet) only get the parametric export.
+        # Save models before plotting: a plot error or a blocking display must not
+        # prevent the completed training run from producing its final .nam files.
+        # HyperWaveNet and HyperA2 also export a fixed-setting snapshot; other
+        # parametric nets (e.g. ConcatWaveNet) only get the parametric export.
         if isinstance(net, _HyperWaveNet):
             _bake(
                 net,
@@ -1261,6 +1252,16 @@ def main(
             output_scale=output_scale,
             user_metadata=user_metadata,
         )
+        if make_plots:
+            _plot_parametric(
+                model,
+                dataset_validation,
+                savefig=_Path(outdir, "comparison.png"),
+                window_start=100_000,
+                window_end=110_000,
+                show=False,
+            )
+            _plot_parametric(model, dataset_validation, show=not no_show)
     finally:
         dataset_train.teardown()
         dataset_validation.teardown()

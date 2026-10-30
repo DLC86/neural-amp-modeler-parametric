@@ -313,6 +313,39 @@ def test_parametric_training_main_exports_baked_and_parametric_models(tmp_path):
     assert _torch.isfinite(y).all()
 
 
+@_pytest.mark.parametrize("failed_plot_call", [1, 2])
+def test_parametric_training_exports_before_plot_failure(
+    tmp_path, mocker, failed_plot_call
+):
+    data_config = _build_data_config(tmp_path, normalize=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    plot_calls = 0
+
+    def plot(*args, **kwargs):
+        nonlocal plot_calls
+        # Models must already exist even while a plot is being displayed.
+        assert _load_json(run_dir / "model.nam")["architecture"] == "WaveNet"
+        assert (
+            _load_json(run_dir / "model_parametric.nam")["architecture"]
+            == "HyperWaveNet"
+        )
+        plot_calls += 1
+        if plot_calls == failed_plot_call:
+            raise RuntimeError("Plot generation failed")
+
+    mocker.patch("nam.train.parametric._plot_parametric", side_effect=plot)
+    with _pytest.raises(RuntimeError, match="Plot generation failed"):
+        _main(
+            data_config=data_config,
+            model_config=_tiny_model_config(),
+            learning_config=_learning_config(),
+            outdir=run_dir,
+            make_plots=True,
+        )
+    assert plot_calls == failed_plot_call
+
+
 def test_parametric_training_without_normalization_skips_compensation(tmp_path):
     model_config = _tiny_model_config()
     data_config = _build_data_config(tmp_path, normalize=False)
