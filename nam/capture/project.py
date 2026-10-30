@@ -246,6 +246,8 @@ class CaptureProject(_BaseModel):
     train_input: str = "input_train.wav"
     validation_input: str = "input_validation.wav"
     sample_rate: _Optional[int] = None
+    input_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)
+    output_level_dbu: _Optional[float] = _Field(default=None, allow_inf_nan=False)
     train_window: WindowModel = _Field(default_factory=WindowModel)
     validation_window: WindowModel = _Field(
         default_factory=lambda: WindowModel(ny=317270)

@@ -198,6 +198,7 @@ def test_training_main_writes_dual_size_checkpoints_and_final_exports(tmp_path, 
             "net": {"name": "HyperA2", "config": config()},
             "loss": {"val_loss": "esr"},
             "optimizer": {"lr": 0.001},
+            "metadata": {"input_level_dbu": 18.0, "output_level_dbu": 12.5},
             "lr_scheduler": None,
         },
         learning_config=_learning_config(),
@@ -207,9 +208,13 @@ def test_training_main_writes_dual_size_checkpoints_and_final_exports(tmp_path, 
     )
     final = json.loads((outdir / "model_parametric.nam").read_text())
     assert final["architecture"] == "HyperA2"
+    assert final["metadata"]["input_level_dbu"] == 18.0
+    assert final["metadata"]["output_level_dbu"] == 12.5
     assert len(final["config"]["submodels"]) == 2
     baked = json.loads((outdir / "model.nam").read_text())
     assert baked["architecture"] == "SlimmableContainer"
+    assert baked["metadata"]["input_level_dbu"] == 18.0
+    assert baked["metadata"]["output_level_dbu"] == 12.5
     assert [
         entry["model"]["config"]["layers"][0]["channels"]
         for entry in baked["config"]["submodels"]
@@ -219,6 +224,11 @@ def test_training_main_writes_dual_size_checkpoints_and_final_exports(tmp_path, 
     for checkpoint in checkpoints:
         assert checkpoint.with_suffix(".nam").exists()
         assert checkpoint.with_name(checkpoint.stem + "_parametric.nam").exists()
+        checkpoint_nam = json.loads(
+            checkpoint.with_name(checkpoint.stem + "_parametric.nam").read_text()
+        )
+        assert checkpoint_nam["metadata"]["input_level_dbu"] == 18.0
+        assert checkpoint_nam["metadata"]["output_level_dbu"] == 12.5
     restored = HyperA2.init_from_config(final["config"])
     restored.import_weights(final["weights"])
     assert restored.branch("full")._template._head_scale != pytest.approx(0.01)

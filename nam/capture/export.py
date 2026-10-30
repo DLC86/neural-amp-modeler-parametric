@@ -205,6 +205,15 @@ def _training_param_specs(project: CaptureProject) -> list[dict[str, _Any]]:
     return params
 
 
+def _calibration_metadata(project: CaptureProject) -> dict[str, _Any]:
+    metadata = {
+        key: value
+        for key in ("input_level_dbu", "output_level_dbu")
+        if (value := getattr(project, key)) is not None
+    }
+    return {"metadata": metadata} if metadata else {}
+
+
 def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
     # input_size/condition_size are omitted on purpose: ConcatWaveNet derives them from
     # the param specs.
@@ -226,6 +235,7 @@ def build_concat_model_config(project: CaptureProject) -> dict[str, _Any]:
     if project.sample_rate is not None:
         config["sample_rate"] = float(project.sample_rate)
     return {
+        **_calibration_metadata(project),
         "net": {"name": "ConcatWaveNet", "config": config},
         "loss": {
             "val_loss": "esr",
@@ -275,6 +285,7 @@ def build_hyper_model_config(project: CaptureProject) -> dict[str, _Any]:
     if project.sample_rate is not None:
         config["sample_rate"] = float(project.sample_rate)
     return {
+        **_calibration_metadata(project),
         "net": {"name": "HyperWaveNet", "config": config},
         "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
         "optimizer": {"lr": 0.002, "weight_decay": 3.17e-07},

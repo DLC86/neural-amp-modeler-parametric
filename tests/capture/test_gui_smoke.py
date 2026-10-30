@@ -339,6 +339,42 @@ def test_main_window_builds_with_no_project(_qapp):
     window.close()
 
 
+def test_capture_calibration_fields_save_and_survive_plan_regeneration(
+    _qapp, tmp_path, monkeypatch
+):
+    from nam.capture.params import KnobSpec
+    from nam.capture.project import new_project, save_project, load_project
+
+    monkeypatch.setattr(_MainWindow_module, "_list_devices", lambda refresh=False: [])
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
+    window = _MainWindow()
+    window.project_dir = tmp_path
+    window.project = new_project(
+        [KnobSpec(name="Gain", min=0, max=10, step=0.5)], n_train=3, n_validation=2
+    )
+    save_project(window.project, tmp_path)
+    window._load_knobs_into_ui()
+    window._refresh_all()
+    assert not window.input_calibration_known.isChecked()
+    assert not window.input_calibration_spin.isEnabled()
+    window.input_calibration_known.setChecked(True)
+    window.input_calibration_spin.setValue(18.0)
+    window.output_calibration_known.setChecked(True)
+    window.output_calibration_spin.setValue(12.5)
+    restored = load_project(tmp_path)
+    assert restored.input_level_dbu == 18.0 and restored.output_level_dbu == 12.5
+    window._on_generate_plan()
+    assert (
+        window.project.input_level_dbu == 18.0
+        and window.project.output_level_dbu == 12.5
+    )
+    window.input_calibration_known.setChecked(False)
+    assert load_project(tmp_path).input_level_dbu is None
+    window.close()
+
+
 def test_loopback_defaults_to_enabled(_qapp):
     window = _MainWindow()
     assert window.loopback_check.isChecked()

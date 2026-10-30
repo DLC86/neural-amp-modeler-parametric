@@ -26,6 +26,7 @@ from nam.data import apply_joint_dataset_hooks as _apply_joint_dataset_hooks
 from nam.data import get_joint_dataset_hooks as _get_joint_dataset_hooks
 from nam.data import init_dataset as _init_dataset
 from nam.models.exportable import Exportable as _Exportable
+from nam.models.metadata import UserMetadata as _UserMetadata
 from nam.models.parametric import HyperWaveNet as _HyperWaveNet
 from nam.models.parametric import HyperA2 as _HyperA2
 from nam.models.parametric import ParametricDataset as _ParametricDataset
@@ -939,9 +940,12 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
     that require reloading through the training code to recover a model.
     """
 
-    def __init__(self, *args, output_scale: _Optional[float] = None, **kwargs):
+    def __init__(
+        self, *args, output_scale: _Optional[float] = None, user_metadata=None, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self._output_scale = output_scale
+        self._user_metadata = user_metadata
 
     def _nam_stem(self, filepath: str) -> str:
         if not filepath.endswith(self.FILE_EXTENSION):
@@ -959,17 +963,18 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
         try:
             if isinstance(net, _HyperWaveNet):
                 _bake(net, net.nominal_params, output_scale=self._output_scale).export(
-                    outdir, basename=basename
+                    outdir, basename=basename, user_metadata=self._user_metadata
                 )
             elif isinstance(net, _HyperA2):
                 net.bake(net.nominal_params, output_scale=self._output_scale).export(
-                    outdir, basename=basename
+                    outdir, basename=basename, user_metadata=self._user_metadata
                 )
             _export_parametric(
                 net,
                 outdir,
                 basename=f"{basename}_parametric",
                 output_scale=self._output_scale,
+                user_metadata=self._user_metadata,
             )
         except NotImplementedError:
             # Defensive: nothing to checkpoint here if a future ParametricNet subclass
@@ -987,7 +992,7 @@ class _ParametricModelCheckpoint(_ModelCheckpoint):
 
 
 def _create_parametric_checkpoint_callbacks(
-    learning_config, output_scale: _Optional[float] = None
+    learning_config, output_scale: _Optional[float] = None, user_metadata=None
 ):
     """
     Same checkpoint cadence/naming as ``nam.train.full._create_callbacks(packed=False)``,
@@ -1010,12 +1015,14 @@ def _create_parametric_checkpoint_callbacks(
         save_top_k=3,
         monitor="val_loss",
         output_scale=output_scale,
+        user_metadata=user_metadata,
         **kwargs,
     )
     checkpoint_epoch = _ParametricModelCheckpoint(
         filename="checkpoint_epoch_{epoch:04d}",
         every_n_epochs=1,
         output_scale=output_scale,
+        user_metadata=user_metadata,
     )
     callbacks = [checkpoint_best]
     if not validate_inside_epoch:
@@ -1024,6 +1031,7 @@ def _create_parametric_checkpoint_callbacks(
     checkpoint_last = _ParametricModelCheckpoint(
         filename="checkpoint_last_{epoch:04d}_{step}",
         output_scale=output_scale,
+        user_metadata=user_metadata,
         **kwargs,
     )
     callbacks.extend([checkpoint_last, checkpoint_epoch])
@@ -1031,9 +1039,11 @@ def _create_parametric_checkpoint_callbacks(
 
 
 def _create_parametric_callbacks(
-    learning_config, output_scale: _Optional[float] = None
+    learning_config, output_scale: _Optional[float] = None, user_metadata=None
 ):
-    callbacks = _create_parametric_checkpoint_callbacks(learning_config, output_scale)
+    callbacks = _create_parametric_checkpoint_callbacks(
+        learning_config, output_scale, user_metadata
+    )
     threshold_esr = learning_config.get("threshold_esr")
     if threshold_esr is not None:
         callbacks.append(
@@ -1122,6 +1132,8 @@ def main(
     no_show: bool = False,
     make_plots=True,
 ):
+    raw_metadata = model_config.get("metadata")
+    user_metadata = _UserMetadata.model_validate(raw_metadata) if raw_metadata else None
     if not outdir.exists():
         raise RuntimeError(f"No output location found at {outdir}")
     for basename, config in (
@@ -1177,7 +1189,9 @@ def main(
         (train_dataloader, val_dataloader),
         learning_config.get("torch_compile", {}),
     )
-    callbacks = _create_parametric_callbacks(learning_config, output_scale)
+    callbacks = _create_parametric_callbacks(
+        learning_config, output_scale, user_metadata
+    )
     trainer = _pl.Trainer(
         callbacks=callbacks,
         default_root_dir=outdir,
@@ -1235,14 +1249,17 @@ def main(
                 net,
                 net.nominal_params,
                 output_scale=output_scale,
-            ).export(outdir)
+            ).export(outdir, user_metadata=user_metadata)
         elif isinstance(net, _HyperA2):
-            net.bake(net.nominal_params, output_scale=output_scale).export(outdir)
+            net.bake(net.nominal_params, output_scale=output_scale).export(
+                outdir, user_metadata=user_metadata
+            )
         _export_parametric(
             net,
             outdir,
             basename="model_parametric",
             output_scale=output_scale,
+            user_metadata=user_metadata,
         )
     finally:
         dataset_train.teardown()

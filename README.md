@@ -36,6 +36,10 @@ The conda environment installs the package itself; the second line adds PySide6 
 
 ## Capture
 
+The Project tab can save optional input/output level calibration in dBu at
+0 dBFS. The trainer carries the standard `input_level_dbu` and `output_level_dbu`
+metadata into final models and checkpoint exports. See [level calibration](docs/level_calibration.md).
+
 The capture app now adapts its timing margin to a reliable clean loopback,
 instead of assuming every interface needs the same four-sample margin.
 See [the response-before-reference warning and timing correction](docs/capture_timing_margin.md).
