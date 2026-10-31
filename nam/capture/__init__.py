@@ -22,7 +22,8 @@ sounddevice, the training stack) that the desktop app defers until needed.
 # decide a timebase from it -- ``captures_raw/`` can be re-measured and cannot go stale
 # (see ``nam.capture.session.measure_from_raw``). Parse it if it is ever compared: as
 # strings, "1.10.0" sorts below "1.2.0".
-CAPTURE_APP_VERSION = "1.2.0"
+# 1.3.0 keeps ASIO open and verifies the clean timing reference before/through captures.
+CAPTURE_APP_VERSION = "1.3.0"
 
 # The version raw recordings (``captures_raw/``) started being saved in. Fixed forever at
 # the version that introduced them, while CAPTURE_APP_VERSION moves on: a project created

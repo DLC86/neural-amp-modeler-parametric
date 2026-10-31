@@ -406,6 +406,7 @@ class PlaybackRecorder(_Protocol):
         loopback_playback: _Optional[_np.ndarray] = None,
         blocksize: int = 0,
         latency: _Latency = "low",
+        host_api: _Optional[str] = None,
         progress: _Optional[_Callable[[float], None]] = None,
         cancel: _Optional[_Callable[[], bool]] = None,
     ) -> _Tuple[_np.ndarray, _Optional[_np.ndarray]]:
@@ -475,6 +476,18 @@ def _raise_on_dropout(status, *, latency: _Latency, blocksize: int) -> None:
 
 
 class SounddeviceRecorder:
+    def __init__(self):
+        self._asio = None
+
+    @property
+    def actual_blocksize(self):
+        return None if self._asio is None else self._asio.actual_blocksize
+
+    def close(self):
+        if self._asio is not None:
+            self._asio.close()
+            self._asio = None
+
     _POLL_MS = 50
 
     def playrec(
@@ -491,18 +504,39 @@ class SounddeviceRecorder:
         loopback_playback: _Optional[_np.ndarray] = None,
         blocksize: int = 0,
         latency: _Latency = "low",
+        host_api: _Optional[str] = None,
         progress: _Optional[_Callable[[float], None]] = None,
         cancel: _Optional[_Callable[[], bool]] = None,
     ) -> _Tuple[_np.ndarray, _Optional[_np.ndarray]]:
         import sounddevice as sd
 
+        if host_api == "ASIO":
+            from ._asio_stream import AsioRecorder
+
+            if self._asio is None:
+                self._asio = AsioRecorder()
+            return self._asio.playrec(
+                playback=_np.asarray(playback, dtype=_np.float32),
+                sample_rate=sample_rate,
+                input_device=input_device,
+                output_device=output_device,
+                input_channel=input_channel,
+                output_channel=output_channel,
+                loopback_input_channel=loopback_input_channel,
+                loopback_output_channel=loopback_output_channel,
+                loopback_playback=loopback_playback,
+                blocksize=blocksize,
+                progress=progress,
+                cancel=cancel,
+            )
+
+        self.close()
         playback = _np.asarray(playback, dtype=_np.float32)
         if playback.ndim != 1:
             raise ValueError(f"Expected mono playback; got shape {playback.shape}")
 
         use_loopback = (
-            loopback_output_channel is not None
-            and loopback_input_channel is not None
+            loopback_output_channel is not None and loopback_input_channel is not None
         )
         if use_loopback:
             if loopback_playback is None:
@@ -556,9 +590,7 @@ class SounddeviceRecorder:
                     f"channel (both {input_channel})."
                 )
 
-        playback_frame = _np.zeros(
-            (len(playback), output_channels), dtype=_np.float32
-        )
+        playback_frame = _np.zeros((len(playback), output_channels), dtype=_np.float32)
         playback_frame[:, output_channel - 1] = playback
         if use_loopback:
             playback_frame[:, loopback_output_channel - 1] = loopback_playback

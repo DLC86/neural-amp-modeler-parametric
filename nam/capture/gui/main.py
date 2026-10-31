@@ -414,6 +414,7 @@ class MainWindow(_QMainWindow):
         self._train_input_name: str = "input_train.wav"
         self._validation_input_name: str = "input_validation.wav"
         self._devices: list[_DeviceInfo] = []
+        self._preview_session = None
         # Last known live device sample rates (name -> Hz), refreshed by the poll. Held
         # so a poll that comes back empty reuses the last reading instead of falling
         # back and flickering.
@@ -700,8 +701,10 @@ class MainWindow(_QMainWindow):
         form.addRow(self.loopback_check)
         form.addRow("Loopback output channel", self.loopback_output_channel_spin)
         form.addRow("Loopback input channel", self.loopback_input_channel_spin)
-        form.addRow("Buffer size", self.buffer_size_combo)
-        form.addRow("Stream latency", self.latency_combo)
+        self.buffer_size_label = _QLabel("Buffer size")
+        self.latency_label = _QLabel("Stream latency")
+        form.addRow(self.buffer_size_label, self.buffer_size_combo)
+        form.addRow(self.latency_label, self.latency_combo)
         layout.addLayout(form)
 
         # Sits directly under the picker it explains: an empty combo cannot be opened,
@@ -734,9 +737,12 @@ class MainWindow(_QMainWindow):
         buttons = _QHBoxLayout()
         refresh_button = _QPushButton("Refresh devices")
         refresh_button.clicked.connect(self._refresh_devices)
+        self.release_audio_button = _QPushButton("Release audio")
+        self.release_audio_button.clicked.connect(self._on_release_audio)
         self.route_test_button = _QPushButton("Route test")
         self.route_test_button.clicked.connect(self._on_route_test)
         buttons.addWidget(refresh_button)
+        buttons.addWidget(self.release_audio_button)
         buttons.addWidget(self.route_test_button)
         layout.addLayout(buttons)
 
@@ -937,6 +943,8 @@ class MainWindow(_QMainWindow):
         directory = _QFileDialog.getExistingDirectory(self, "Choose project folder")
         if not directory:
             return
+        if not self._close_audio():
+            return
         project_dir = _Path(directory)
 
         # Don't silently clobber an existing project in this folder.
@@ -1039,6 +1047,8 @@ class MainWindow(_QMainWindow):
         directory = _QFileDialog.getExistingDirectory(self, "Choose project folder")
         if not directory:
             return
+        if not self._close_audio():
+            return
         project_dir = _Path(directory)
         try:
             project = _load_project(project_dir)
@@ -1104,7 +1114,7 @@ class MainWindow(_QMainWindow):
         project, project_dir = self.project, self.project_dir
         self._run_worker(
             lambda progress, cancel: _audit_captures(
-                project, project_dir, progress=progress
+                project, project_dir, progress=progress, cancel=cancel
             ),
             on_progress=lambda fraction: self.capture_progress.setValue(
                 int(fraction * 100)
@@ -1487,6 +1497,8 @@ class MainWindow(_QMainWindow):
 
         _save_project(project, self.project_dir)
         self.project = project
+        if self.session is not None:
+            self.session.close_audio()
         self.session = _CaptureSession(self.project, self.project_dir)
         self.project_label.setText(
             f"Project: {project.name or self.project_dir.name} ({self.project_dir})"
@@ -1595,6 +1607,11 @@ class MainWindow(_QMainWindow):
 
     def _refresh_devices(self) -> None:
         safe_to_reinit = self._stop_worker_before_reinit()
+        if safe_to_reinit and self.session is not None:
+            self.session.close_audio()
+        if safe_to_reinit and self._preview_session is not None:
+            self._preview_session.close_audio()
+            self._preview_session = None
         if not safe_to_reinit:
             # A stream may still be open. A stale table beats undefined behaviour.
             self.project_log.appendPlainText(
@@ -1695,9 +1712,25 @@ class MainWindow(_QMainWindow):
         self.latency_combo.blockSignals(True)
         self.latency_combo.setCurrentIndex(max(0, _latency_index(audio.latency)))
         self.latency_combo.blockSignals(False)
+        self._update_buffer_controls()
+
+    def _update_buffer_controls(self):
+        device = self.device_combo.currentData()
+        asio = device is not None and device.host_api == "ASIO"
+        self.buffer_size_label.setText("ASIO buffer size" if asio else "Buffer size")
+        self.buffer_size_combo.setToolTip(
+            "Native ASIO buffer in samples. The actual size is verified before audio is played; "
+            "the route test shows the size used. Auto uses the reported device default; "
+            "refresh devices after changing the driver's control panel."
+            if asio
+            else "Audio processing block size in samples; Auto lets the backend choose."
+        )
+        self.latency_combo.setVisible(not asio)
+        self.latency_label.setVisible(not asio)
 
     def _on_device_changed(self) -> None:
         self._update_channel_ranges()
+        self._update_buffer_controls()
         self._save_audio_settings()
         self._refresh_sample_rate_warning()
 
@@ -1777,6 +1810,7 @@ class MainWindow(_QMainWindow):
         # into the open project's settings, or the standalone settings when there is
         # no project yet -- see ``_current_audio_settings``.
         audio = self._current_audio_settings()
+        previous = audio.stream_fingerprint()
         device = self.device_combo.currentData()
         audio.output_device = device.name if device else None
         audio.input_device = device.name if device else None
@@ -1791,6 +1825,8 @@ class MainWindow(_QMainWindow):
             audio.loopback_input_channel = None
         audio.blocksize = int(self.buffer_size_combo.currentData())
         audio.latency = self.latency_combo.currentData()
+        if audio.stream_fingerprint() != previous and not self._close_audio():
+            return
         if self.project is not None and self.project_dir is not None:
             _save_project(self.project, self.project_dir)
 
@@ -1828,8 +1864,11 @@ class MainWindow(_QMainWindow):
             # the mismatch warning, wrong here: this needs a rate the device accepts,
             # and PortAudio reports ``default_samplerate`` because the driver takes it.
             rate = int(round(device.default_samplerate))
+        if self._preview_session is not None:
+            return self._preview_session, rate
         project = _CaptureProject(knobs=[], audio=self._audio_settings)
         session = _CaptureSession(project, self.project_dir or _Path("."))
+        self._preview_session = session
         return session, rate
 
     def _on_route_test(self) -> None:
@@ -1841,7 +1880,12 @@ class MainWindow(_QMainWindow):
             )
             return
         self.route_test_progress.setValue(0)
-        self.route_test_result_label.setText("Running route test...")
+        self.route_test_result_label.setText(
+            "Preparing ASIO and checking clean loopback timing (first operation takes at least 20 seconds)..."
+            if self._current_audio_settings().host_api == "ASIO"
+            and self._current_audio_settings().loopback_enabled
+            else "Running route test..."
+        )
         self._run_worker(
             lambda progress, cancel: session.route_test(
                 sample_rate=sample_rate, progress=progress, cancel=cancel
@@ -1885,17 +1929,21 @@ class MainWindow(_QMainWindow):
                 elif result.loopback_disagreement:
                     text += (
                         f"; ⚠ amp-return delay {amp_delay} disagrees with the loopback "
-                        f"by more than {_LOOPBACK_CROSSCHECK_SAMPLES} sample(s). On a "
-                        "correctly patched rig the two travel the same route and agree; "
-                        "check the loopback patch before capturing."
+                        f"by more than {_LOOPBACK_CROSSCHECK_SAMPLES} sample(s). "
+                        "Pedal EQ/distortion can affect this reading; alignment uses "
+                        "the clean loopback. Check routing if the offset is unexpected."
                     )
                 else:
                     text += f"; amp-return delay {amp_delay} agrees"
             if result.latency.peak_delay is not None:
                 text += (
-                    f"; timing resolved to {result.latency.peak_delay:.2f} samples "
+                    f"; impulse peak at {result.latency.peak_delay:.2f} samples "
                     "(sub-sample alignment active)"
                 )
+            if result.effective_buffer_size is not None:
+                text += f"; ASIO buffer: {result.effective_buffer_size} samples"
+                if not result.loopback_used:
+                    text += "; timing stability not verified without a clean loopback"
             self.route_test_result_label.setText(text)
         else:
             self.route_test_result_label.setText(
@@ -1965,6 +2013,10 @@ class MainWindow(_QMainWindow):
         self.capture_log.appendPlainText(
             f"Capturing {entry.split} #{entry.index}: {format_params(entry.params)}"
         )
+        if self.project.audio.host_api == "ASIO":
+            self.capture_log.appendPlainText(
+                "ASIO: verifying timing before recording; the first operation includes startup calibration."
+            )
         self.cancel_button.setEnabled(True)
         session = self.session
         assert session is not None
@@ -2261,6 +2313,33 @@ class MainWindow(_QMainWindow):
 
     # -- worker plumbing -----------------------------------------------
 
+    def _close_audio(self):
+        if not self._stop_worker_before_reinit():
+            return False
+        try:
+            if self.session is not None:
+                self.session.close_audio()
+            if self._preview_session is not None:
+                self._preview_session.close_audio()
+                self._preview_session = None
+        except Exception as exc:
+            _QMessageBox.critical(self, "Audio could not close", str(exc))
+            return False
+        return True
+
+    def closeEvent(self, event):
+        if self._close_audio():
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
+    def _on_release_audio(self):
+        if self._close_audio():
+            self.route_test_result_label.setText("Audio device released.")
+            self.statusBar().showMessage(
+                "Audio device released. The next operation will initialize audio again."
+            )
+
     def _run_worker(
         self,
         call: _Callable[[_Callable[[float], None], _Callable[[], bool]], _Any],
@@ -2296,12 +2375,26 @@ class MainWindow(_QMainWindow):
 
         worker.finished.connect(release_worker)
 
+        disable = tuple(disable) + (
+            self.device_combo,
+            self.output_channel_spin,
+            self.input_channel_spin,
+            self.loopback_check,
+            self.loopback_output_channel_spin,
+            self.loopback_input_channel_spin,
+            self.buffer_size_combo,
+            self.latency_combo,
+            self.generate_plan_button,
+            self.add_corners_button,
+            self.release_audio_button,
+        )
+        disabled_states = [(widget, widget.isEnabled()) for widget in disable]
         for widget in disable:
             widget.setEnabled(False)
 
         def cleanup() -> None:
-            for widget in disable:
-                widget.setEnabled(True)
+            for widget, enabled in disabled_states:
+                widget.setEnabled(enabled)
             self._worker = None
             self._cancel_token = None
             if on_finished is not None:

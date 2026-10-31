@@ -34,15 +34,61 @@ def _qapp():
     yield app
 
 
+@_pytest.mark.parametrize("host_api", ["ASIO", "Core Audio"])
+def test_asio_exposes_native_buffer_and_hides_latency(_qapp, monkeypatch, host_api):
+    device = _DeviceInfo(
+        index=0,
+        name="Test interface",
+        host_api=host_api,
+        max_input_channels=8,
+        max_output_channels=8,
+        default_samplerate=48000,
+    )
+    monkeypatch.setattr(_MainWindow_module, "_list_devices", lambda **kwargs: [device])
+    monkeypatch.setattr(_MainWindow_module, "_current_device_sample_rates", lambda: {})
+    window = _MainWindow()
+    try:
+        window.device_combo.setCurrentIndex(0)
+        window._update_buffer_controls()
+        assert (window.buffer_size_label.text() == "ASIO buffer size") == (
+            host_api == "ASIO"
+        )
+        assert window.latency_combo.isHidden() == (host_api == "ASIO")
+        assert window.latency_label.isHidden() == (host_api == "ASIO")
+    finally:
+        window.close()
+
+
+def test_release_audio_closes_project_and_preview(_qapp, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(_MainWindow_module, "_list_devices", lambda **kwargs: [])
+    window = _MainWindow()
+    closed = []
+    window.session = SimpleNamespace(close_audio=lambda: closed.append("project"))
+    window._preview_session = SimpleNamespace(
+        close_audio=lambda: closed.append("preview")
+    )
+    window.release_audio_button.click()
+    assert closed == ["project", "preview"]
+    assert window._preview_session is None
+    window.session = None
+    window.close()
+
+
 def test_format_params_formats_like_a_human_would_dial_it():
     assert _format_params({"Gain": 3.5, "Tone": 7.0}) == "Gain=3.5, Tone=7"
 
 
 def test_format_qa_summary_flags_problems():
-    qa = _QAModel(peak=-6.0, clipping=False, impulse_detected=True, delay_disagreement=False)
+    qa = _QAModel(
+        peak=-6.0, clipping=False, impulse_detected=True, delay_disagreement=False
+    )
     assert _format_qa_summary(qa) == "peak=-6.0 dBFS"
 
-    bad = _QAModel(peak=0.0, clipping=True, impulse_detected=False, delay_disagreement=True)
+    bad = _QAModel(
+        peak=0.0, clipping=True, impulse_detected=False, delay_disagreement=True
+    )
     summary = _format_qa_summary(bad)
     assert "CLIPPING" in summary
     assert "no impulse" in summary
@@ -160,8 +206,13 @@ _SPLIT_WINDOWS_DEVICES = [
 
 def test_no_message_when_a_duplex_device_exists():
     """One duplex device among the split ones is enough to keep the label hidden."""
-    assert _no_duplex_devices_message(_SPLIT_WINDOWS_DEVICES + [_ASIO_DEVICE], "win32") == ""
-    assert _no_duplex_devices_message([_device("Mic", "Core Audio", 4, 4)], "darwin") == ""
+    assert (
+        _no_duplex_devices_message(_SPLIT_WINDOWS_DEVICES + [_ASIO_DEVICE], "win32")
+        == ""
+    )
+    assert (
+        _no_duplex_devices_message([_device("Mic", "Core Audio", 4, 4)], "darwin") == ""
+    )
 
 
 def test_each_empty_picker_case_gets_its_own_advice():
@@ -216,7 +267,9 @@ def test_route_test_without_a_project_still_gets_a_usable_rate(_qapp, monkeypatc
     """
     asio = _device("Audient USB Audio ASIO Driver", "ASIO", 20, 24)
     window = _MainWindow()
-    monkeypatch.setattr(_MainWindow_module, "_list_devices", lambda refresh=False: [asio])
+    monkeypatch.setattr(
+        _MainWindow_module, "_list_devices", lambda refresh=False: [asio]
+    )
     window._refresh_devices()
     window.project = None
     window.session = None
@@ -427,7 +480,9 @@ def test_gain_column_is_single_select(_qapp):
 
 
 def test_generate_plan_includes_corners_when_checked(_qapp, tmp_path, monkeypatch):
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     window = _MainWindow()
     window.project_dir = tmp_path
     _fill_knob_rows(window, _GAIN_KNOB_ROWS)
@@ -508,7 +563,9 @@ def test_new_project_gets_a_session_and_keeps_audio_settings_through_generate_pl
         lambda *a, **k: str(tmp_path),
     )
     monkeypatch.setattr(
-        _InputWavDialog, "exec", lambda self: _MainWindow_module._QDialog.DialogCode.Rejected
+        _InputWavDialog,
+        "exec",
+        lambda self: _MainWindow_module._QDialog.DialogCode.Rejected,
     )
     window = _MainWindow()
     window._on_new_project()
@@ -567,7 +624,9 @@ def test_reopening_project_does_not_recompute_train_captures_from_corner_entries
     # from entries_for_split("train") on reopen would inflate it past the originally
     # planned LHS count. The count -- and the checkbox that produced the corners --
     # must instead survive the round-trip unchanged.
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     window = _MainWindow()
     window.project_dir = tmp_path
     _fill_knob_rows(window, _GAIN_KNOB_ROWS)
@@ -597,7 +656,9 @@ def test_regenerate_plan_reimports_matching_captures_immediately(
     # Regenerating a plan with the same seed reproduces the same y_paths. If a WAV
     # for one of them is already on disk and recorded in data.json, it must be
     # re-imported as part of regeneration itself -- not only after a close/reopen.
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     monkeypatch.setattr(
         _MainWindow_module._QMessageBox,
         "question",
@@ -657,7 +718,8 @@ def test_regenerate_plan_keeps_the_projects_recorded_timebase(
         _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
     )
     monkeypatch.setattr(
-        _MainWindow_module._QMessageBox, "question",
+        _MainWindow_module._QMessageBox,
+        "question",
         lambda *a, **k: _MainWindow_module._QMessageBox.StandardButton.Yes,
     )
     window = _MainWindow()
@@ -714,7 +776,9 @@ def test_sort_entries_rejects_an_unknown_mode():
 def test_sort_button_cycles_the_three_modes_and_reorders_both_tables(
     _qapp, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     window = _MainWindow()
     window.project_dir = tmp_path
     _fill_knob_rows(window, _GAIN_KNOB_ROWS)
@@ -757,7 +821,9 @@ def test_sort_button_cycles_the_three_modes_and_reorders_both_tables(
 def test_sorting_remaps_capture_selected_and_capture_next(_qapp, tmp_path, monkeypatch):
     # The tables are sorted but the project keeps plan order, so a row index must be read
     # through the displayed order -- otherwise "capture selected" records the wrong knobs.
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     window = _MainWindow()
     window.project_dir = tmp_path
     _fill_knob_rows(window, _GAIN_KNOB_ROWS)
@@ -766,7 +832,9 @@ def test_sorting_remaps_capture_selected_and_capture_next(_qapp, tmp_path, monke
     window._on_generate_plan()
 
     captured = []
-    monkeypatch.setattr(_MainWindow, "_begin_capture", lambda self, entry: captured.append(entry))
+    monkeypatch.setattr(
+        _MainWindow, "_begin_capture", lambda self, entry: captured.append(entry)
+    )
 
     window._sort_mode = "descending"
     window._refresh_plan_tables()
@@ -788,7 +856,9 @@ def test_sorting_remaps_capture_selected_and_capture_next(_qapp, tmp_path, monke
 def test_add_corner_captures_button_appends_without_regenerating(
     _qapp, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(_MainWindow_module._QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _MainWindow_module._QMessageBox, "information", lambda *a, **k: None
+    )
     window = _MainWindow()
     window.project_dir = tmp_path
     _fill_knob_rows(window, _GAIN_KNOB_ROWS)
@@ -818,10 +888,17 @@ def _project_with_captures(tmp_path, _qapp):
 
     rng = np.random.default_rng(42)
     for name, n in (("input_train.wav", 48_000), ("input_validation.wav", 24_000)):
-        np_to_wav((0.1 * rng.standard_normal(n)).astype(np.float32),
-                  tmp_path / name, rate=48_000)
-    project = new_project([KnobSpec(name="Gain", min=0.0, max=10.0, step=0.5)],
-                          n_train=2, n_validation=1, seed=0)
+        np_to_wav(
+            (0.1 * rng.standard_normal(n)).astype(np.float32),
+            tmp_path / name,
+            rate=48_000,
+        )
+    project = new_project(
+        [KnobSpec(name="Gain", min=0.0, max=10.0, step=0.5)],
+        n_train=2,
+        n_validation=1,
+        seed=0,
+    )
     save_project(project, tmp_path)
     project = _load_project(tmp_path)
     _enable_loopback(project)
@@ -836,12 +913,15 @@ def _project_with_captures(tmp_path, _qapp):
     return window, project, entry
 
 
-def test_a_bad_timebase_blocks_capturing_before_the_rig_is_driven(_qapp, tmp_path, monkeypatch):
+def test_a_bad_timebase_blocks_capturing_before_the_rig_is_driven(
+    _qapp, tmp_path, monkeypatch
+):
     window, project, _ = _project_with_captures(tmp_path, _qapp)
     project.alignment_reference = 129.0
     shown: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        _MainWindow_module._QMessageBox, "critical",
+        _MainWindow_module._QMessageBox,
+        "critical",
         lambda parent, title, text, *a, **k: shown.append((title, text)),
     )
     started: list[object] = []
@@ -851,7 +931,7 @@ def test_a_bad_timebase_blocks_capturing_before_the_rig_is_driven(_qapp, tmp_pat
     window.close()
 
     assert started == []  # refused before any capture was started
-    (title, text), = shown
+    ((title, text),) = shown
     assert title == "Captures can't be timed together"
     assert "Clear captures" in text
 
@@ -860,7 +940,8 @@ def test_clear_captures_button_resets_the_project(_qapp, tmp_path, monkeypatch):
     window, project, entry = _project_with_captures(tmp_path, _qapp)
     project.alignment_reference = 129.0
     monkeypatch.setattr(
-        _MainWindow_module._QMessageBox, "question",
+        _MainWindow_module._QMessageBox,
+        "question",
         lambda *a, **k: _MainWindow_module._QMessageBox.StandardButton.Yes,
     )
 
@@ -889,11 +970,13 @@ def test_clear_captures_button_reaches_a_pending_entry_whose_file_survives(
 
     informed: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        _MainWindow_module._QMessageBox, "information",
+        _MainWindow_module._QMessageBox,
+        "information",
         lambda parent, title, text, *a, **k: informed.append((title, text)),
     )
     monkeypatch.setattr(
-        _MainWindow_module._QMessageBox, "question",
+        _MainWindow_module._QMessageBox,
+        "question",
         lambda *a, **k: _MainWindow_module._QMessageBox.StandardButton.Yes,
     )
 

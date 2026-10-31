@@ -79,6 +79,8 @@ describe_command = [
 include-package-data = true
 packages = [
     "nam",
+    "nam.capture",
+    "nam.capture.gui",
     "nam._dependencies",
     "nam._dependencies.auraloss",
     "nam.train",

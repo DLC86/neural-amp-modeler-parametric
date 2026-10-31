@@ -101,6 +101,11 @@ several samples whenever that link re-locks. Run *Route test* before you start.
 plays the input through your rig, records the return, measures the delay, checks for clipping and
 dropouts, and writes the WAV.
 
+On ASIO, the app keeps audio open between captures and verifies the native buffer
+and clean-loopback timing. The first operation includes startup calibration; use
+**Release audio** to free the device for another application. See
+[ASIO capture timing](docs/asio_capture_timing.md) for the behavior and limits.
+
 ## Train
 
 The Capture tab has *Export ConcatWaveNet Configs* and *Export HyperWaveNet Configs*. Either writes

@@ -34,7 +34,6 @@ from nam.capture.session import timebase_problem as _timebase_problem
 from nam.data import np_to_wav as _np_to_wav
 from nam.data import wav_to_np as _wav_to_np
 
-
 _RATE = 48_000
 
 
@@ -231,7 +230,6 @@ def test_capture_entry_records_measures_and_persists(tmp_path):
     assert not qa.clipping
     assert not qa.delay_disagreement
     assert entry.delay == true_delay - _LEAD
-
     wav_path = project_dir / entry.y_path
     assert wav_path.is_file()
     y = _np.asarray(_wav_to_np(wav_path)).squeeze()
@@ -248,6 +246,29 @@ def test_capture_entry_records_measures_and_persists(tmp_path):
     assert data["train"][0]["delay"] == true_delay - _LEAD
     assert data["train"][0]["x_path"] == "input_train.wav"
     assert data["validation"] == []
+
+
+def test_audit_checks_program_timing_after_agreeing_initial_blips(tmp_path):
+    project_dir = _make_project_dir(tmp_path)
+    x = _np.random.default_rng(8).normal(0, 0.04, 4 * _RATE).astype(_np.float32)
+    _np_to_wav(x, project_dir / "input_train.wav", rate=_RATE)
+    project = _load_project(project_dir)
+    _enable_loopback(project)
+
+    class JumpRecorder(_FakeRecorder):
+        def playrec(self, playback, sample_rate, **kwargs):
+            main, loopback = super().playrec(playback, sample_rate, **kwargs)
+            start = 108000 + 2 * _RATE
+            loopback[start:-7] = loopback[start + 7 :]
+            loopback[-7:] = 0
+            return main, loopback
+
+    session = _CaptureSession(project, project_dir, recorder=JumpRecorder(480))
+    session.capture_entry(project.pending_entries()[0])
+    audits = _audit_captures(project, project_dir)
+    assert abs(audits[0].offset) < 0.01
+    assert "timing changed" in audits[0].stream_timing_problem
+    assert any("timing changed" in p for p in _audit_problems(audits))
 
 
 def test_capture_saves_response_content_aligned_by_delay(tmp_path):
@@ -1103,7 +1124,9 @@ def test_no_correction_without_a_loopback(tmp_path):
     assert qa.amp_return_delay == 480 - 1
 
 
-def test_a_legacy_project_keeps_the_timebase_its_captures_were_written_against(tmp_path):
+def test_a_legacy_project_keeps_the_timebase_its_captures_were_written_against(
+    tmp_path,
+):
     # A project part-captured before the timebase became stateless must reproduce its own
     # recorded offset, or captures from before and after the upgrade land (reference-lead)
     # samples apart -- the phase error alignment exists to remove.
@@ -1425,8 +1448,9 @@ def test_audit_passes_a_healthy_set_and_flags_disagreeing_blips(tmp_path):
     session._recorder = _GlitchedBlipRecorder(480)
     session.capture_entry(entries[2])
     problems = _audit_problems(_audit_captures(project, project_dir))
-    assert any("timing blips came back" in p and entries[2].y_path in p
-               for p in problems)
+    assert any(
+        "timing blips came back" in p and entries[2].y_path in p for p in problems
+    )
 
 
 def test_audit_reports_captures_it_cannot_check_rather_than_passing_them(tmp_path):
@@ -1506,9 +1530,7 @@ def test_captures_from_different_schemes_are_named_individually(tmp_path):
     assert _shared_offset(audits) is None
     problems = _audit_problems(audits)
 
-    assert all(
-        any(entry.y_path in p for p in problems) for entry in entries[1:3]
-    )
+    assert all(any(entry.y_path in p for p in problems) for entry in entries[1:3])
     assert not any(entries[0].y_path in p for p in problems)
 
 
@@ -1536,9 +1558,7 @@ def test_the_preamble_layout_is_read_from_the_signal_not_from_constants(tmp_path
         spec = _BP(sample_rate=rate)
         read = spec.as_played()
         assert read.blip_locations == spec.blip_locations
-        assert read.noise_interval == (
-            int(_NOISE[0] * rate), int(_NOISE[1] * rate)
-        )
+        assert read.noise_interval == (int(_NOISE[0] * rate), int(_NOISE[1] * rate))
 
 
 def test_a_changed_preamble_needs_no_version_gate(tmp_path):
@@ -1547,9 +1567,7 @@ def test_a_changed_preamble_needs_no_version_gate(tmp_path):
     playback, n_pre, _PP = _played(blips=(0.2, 0.9, 1.7), amplitude=0.4)
     read = _PP.from_playback(playback, n_pre, _RATE)
 
-    assert read.blip_locations == (
-        int(0.2 * _RATE), int(0.9 * _RATE), int(1.7 * _RATE)
-    )
+    assert read.blip_locations == (int(0.2 * _RATE), int(0.9 * _RATE), int(1.7 * _RATE))
     # The noise window still lands in the silence before the first blip, wherever it is.
     assert read.noise_interval[1] <= read.blip_locations[0]
 
@@ -1593,11 +1611,12 @@ def test_audit_measures_against_the_preamble_the_capture_was_played(tmp_path):
 
     # Drop the played copy the manifest points at.
     import json as _j
+
     man = _j.loads(
         (project_dir / _CAPTURES_RAW_DIRNAME / _RAW_MANIFEST_FILENAME).read_text()
     )
-    record = next(r for r in man['captures'] if r['y_path'] == entry.y_path)
-    (project_dir / _CAPTURES_RAW_DIRNAME / record['playback']).unlink()
+    record = next(r for r in man["captures"] if r["y_path"] == entry.y_path)
+    (project_dir / _CAPTURES_RAW_DIRNAME / record["playback"]).unlink()
     (audit,) = _audit_captures(project, project_dir)
     assert audit.unchecked is not None
 
@@ -1610,26 +1629,30 @@ def test_recovery_re_measures_instead_of_inventing_a_result(tmp_path):
     project_dir = _make_project_dir(tmp_path)
     project = _load_project(project_dir)
     _enable_loopback(project)
-    session = _CaptureSession(project, project_dir, recorder=_DriftingRecorder(480, drift=0.3))
+    session = _CaptureSession(
+        project, project_dir, recorder=_DriftingRecorder(480, drift=0.3)
+    )
     entries = project.pending_entries()
     for entry in entries[:2]:
         session.capture_entry(entry)
-    original = {e.y_path: (e.delay, e.qa.subsample_shift, e.qa.peak_delay)
-                for e in project.captured_entries()}
+    original = {
+        e.y_path: (e.delay, e.qa.subsample_shift, e.qa.peak_delay)
+        for e in project.captured_entries()
+    }
     assert _audit_problems(_audit_captures(project, project_dir)) == []
 
     # Plan regenerated: entries pending, WAVs and data.json still on disk.
     for entry in project.entries:
         entry.status, entry.qa = "pending", None
-    session.recover_captured_from_disk(
-        _find_recoverable_entries(project, project_dir)
-    )
+    session.recover_captured_from_disk(_find_recoverable_entries(project, project_dir))
 
     for entry in project.captured_entries():
         delay, shift, peak = original[entry.y_path]
         assert entry.delay == delay
         assert entry.qa.peak_delay == _pytest.approx(peak, abs=1e-9)
-        assert (entry.qa.subsample_shift or 0.0) == _pytest.approx(shift or 0.0, abs=1e-9)
+        assert (entry.qa.subsample_shift or 0.0) == _pytest.approx(
+            shift or 0.0, abs=1e-9
+        )
         assert len(entry.qa.blip_delays) == 2
     # And the audit still passes, rather than reporting the whole set as offset because
     # the shift it was written with had been forgotten.

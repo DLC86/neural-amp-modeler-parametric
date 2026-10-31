@@ -200,9 +200,7 @@ def has_captures(project: _CaptureProject, project_dir: _Path) -> bool:
     return bool(_find_clearable_entries(project, project_dir))
 
 
-def timebase_problem(
-    project: _CaptureProject, project_dir: _Path
-) -> _Optional[str]:
+def timebase_problem(project: _CaptureProject, project_dir: _Path) -> _Optional[str]:
     """
     Why this project cannot be captured into, or ``None`` if it can.
 
@@ -251,12 +249,14 @@ class CaptureAudit:
     blips_disagree: bool = False
     # Why this capture could not be checked, if it could not be.
     unchecked: _Optional[str] = None
+    stream_timing_problem: _Optional[str] = None
 
 
 def audit_captures(
     project: _CaptureProject,
     project_dir: _Path,
     progress: _Optional[_Callable[[float], None]] = None,
+    cancel: _Optional[_Callable[[], bool]] = None,
 ) -> list[CaptureAudit]:
     """
     Re-measure every captured entry from its own raw loopback recording and report where
@@ -278,13 +278,19 @@ def audit_captures(
     expected = -alignment_lead(project)
     entries = project.captured_entries()
     for index, entry in enumerate(entries):
+        if cancel is not None and cancel():
+            from .audio import CaptureCancelled
+
+            raise CaptureCancelled()
         if progress is not None:
             progress(index / max(len(entries), 1))
         try:
             latency = measure_from_raw(project, project_dir, entry.y_path)
         except Exception as exc:  # unreadable, too short, or nothing kept to measure
             audits.append(
-                CaptureAudit(y_path=entry.y_path, unchecked=f"could not measure ({exc})")
+                CaptureAudit(
+                    y_path=entry.y_path, unchecked=f"could not measure ({exc})"
+                )
             )
             continue
         if latency.peak_delay is None or entry.delay is None:
@@ -306,11 +312,54 @@ def audit_captures(
                 offset=residual - expected,
                 blip_delays=latency.blip_delays,
                 blips_disagree=latency.disagreement_too_high,
+                stream_timing_problem=_audit_stream_timing(
+                    project_dir, entry.y_path, latency, cancel
+                ),
             )
         )
     if progress is not None:
         progress(1.0)
     return audits
+
+
+def _audit_stream_timing(project_dir, y_path, latency, cancel=None):
+    """Check the program, not only the preamble, in a preserved raw loopback."""
+    from ..data import wav_to_np
+    from .audio import AudioDeviceError
+    from ._asio_stream import check_timing, transfer
+
+    try:
+        manifest = _json.loads(
+            (
+                _Path(project_dir) / _CAPTURES_RAW_DIRNAME / _RAW_MANIFEST_FILENAME
+            ).read_text()
+        )
+        record = next(r for r in manifest["captures"] if r["y_path"] == y_path)
+        base = _Path(project_dir) / _CAPTURES_RAW_DIRNAME
+        playback, info = wav_to_np(base / record["playback"], info=True)
+        recorded = wav_to_np(base / record["raw_loopback"])
+        preamble = int(record["preamble_samples"])
+        delay = int(round(latency.peak_delay))
+        reference = transfer(
+            playback[:preamble], recorded[delay : delay + preamble], info.rate
+        )
+        check_timing(
+            playback,
+            recorded,
+            info.rate,
+            delay,
+            reference,
+            require_measurable=False,
+            cancel=cancel,
+        )
+    except AudioDeviceError as exc:
+        return (
+            str(exc).split("This capture was not saved.")[0]
+            + "The saved raw recording needs recovery or recapture."
+        )
+    except (OSError, ValueError, KeyError, StopIteration, TypeError) as exc:
+        return f"Program timing could not be checked: {exc}"
+    return None
 
 
 def shared_offset(audits: _Sequence[CaptureAudit]) -> _Optional[float]:
@@ -325,7 +374,9 @@ def shared_offset(audits: _Sequence[CaptureAudit]) -> _Optional[float]:
     offsets = [
         audit.offset
         for audit in audits
-        if audit.offset is not None and not audit.blips_disagree
+        if audit.offset is not None
+        and not audit.blips_disagree
+        and not audit.stream_timing_problem
     ]
     if not offsets:
         return None
@@ -347,6 +398,8 @@ def audit_problems(audits: _Sequence[CaptureAudit]) -> list[str]:
     """
     problems: list[str] = []
     for audit in audits:
+        if audit.stream_timing_problem:
+            problems.append(f"{audit.y_path}: {audit.stream_timing_problem}")
         if audit.unchecked is not None:
             problems.append(f"{audit.y_path}: not checked -- {audit.unchecked}.")
         elif audit.blips_disagree:
@@ -583,6 +636,7 @@ class RouteTestResult:
     # configured and the amp return itself found nothing", which needs a different
     # message since there is no loopback to blame.
     loopback_failed: bool = False
+    effective_buffer_size: _Optional[int] = None
 
     @property
     def ok(self) -> bool:
@@ -609,6 +663,11 @@ class CaptureSession:
             recorder = SounddeviceRecorder()
         self._recorder = recorder
         self._inputs: dict[str, _np.ndarray] = {}
+
+    def close_audio(self):
+        close = getattr(self._recorder, "close", None)
+        if close is not None:
+            close()
 
     def load_inputs(self) -> int:
         """
@@ -722,6 +781,7 @@ class CaptureSession:
             loopback_playback=loopback_playback if use_loopback else None,
             blocksize=audio.blocksize,
             latency=audio.latency,
+            host_api=audio.host_api,
             progress=progress,
             cancel=cancel,
             **self._resolve_devices(),
@@ -1035,6 +1095,7 @@ class CaptureSession:
             crosscheck=crosscheck,
             loopback_disagreement=disagreement,
             loopback_failed=loopback_failed,
+            effective_buffer_size=getattr(self._recorder, "actual_blocksize", None),
         )
 
     def capture_entry(
@@ -1147,9 +1208,7 @@ class CaptureSession:
             try:
                 y = _np.asarray(wav_to_np(path), dtype=_np.float32).squeeze()
             except Exception as exc:
-                notes.append(
-                    f"{entry.y_path}: could not read WAV to restore ({exc})."
-                )
+                notes.append(f"{entry.y_path}: could not read WAV to restore ({exc}).")
                 continue
             shift = 0.0
             loopback_used = False
@@ -1234,6 +1293,11 @@ class CaptureSession:
         delay: _Optional[int] = None,
     ) -> _QAModel:
         messages: list[str] = []
+        if self.project.audio.host_api == "ASIO" and not loopback_used:
+            messages.append(
+                "ASIO timing stability was not verified because no clean loopback is "
+                "enabled. Enable a separate clean loopback to verify capture alignment."
+            )
         # The delay actually written for this capture, which is what later captures are
         # compared against. Falls back to the measurement for callers that do not derive
         # a label of their own (recovery from disk).
@@ -1300,8 +1364,7 @@ class CaptureSession:
         if delay is not None:
             other_delays = self._comparable_delays(entry)
             if other_delays and (
-                abs(delay - int(_np.median(other_delays)))
-                >= DELAY_DISAGREEMENT_SAMPLES
+                abs(delay - int(_np.median(other_delays))) >= DELAY_DISAGREEMENT_SAMPLES
             ):
                 delay_disagreement = True
                 messages.append(
@@ -1323,8 +1386,9 @@ class CaptureSession:
         if loopback_disagreement and not latency.disagreement_too_high:
             messages.append(
                 f"The loopback and amp-return timing blips disagree by more than "
-                f"{LOOPBACK_CROSSCHECK_SAMPLES} samples. Check the loopback patch: the "
-                "two routes are no longer travelling the same chain."
+                f"{LOOPBACK_CROSSCHECK_SAMPLES} samples. Pedal EQ/distortion can affect "
+                "this comparison; alignment uses the clean loopback. Check routing "
+                "if the offset is unexpected."
             )
 
         return _QAModel(
