@@ -64,7 +64,9 @@ For standard single-setting NAM captures, keep using the full-length v3.0.0 file
 once there, so there's nothing to save, and the stock trainer keys off blip landmarks that a
 truncated cut doesn't preserve.
 
-**Knobs.** One row per control you want the model to learn:
+**Controls.** Choose **Add control**, then **Knob** or **Switch**. For a switch,
+set the number of positions and a distinct name for each position; use its
+**positions — edit** button to modify them. For a knob, configure:
 
 | Field | What it means |
 | --- | --- |
@@ -77,11 +79,16 @@ truncated cut doesn't preserve.
 
 - **LHS points** — a Latin hypercube over the knob space. Space-filling, so coverage stays even as
   the knob count grows, where a grid would need kⁿ captures. The app recommends `15 × knobs`
-  training points and `3 × knobs` validation points.
+  training points and `min(3 × knobs, 10)` validation points **per switch combination**.
+  Every combination gets separate knob coverage; both enabled splits must cover all
+  combinations. With switches only, capture each combination once with validation set to zero.
 - **Corners** — the knob-range extremes, which bound the model's behavior. LHS covers each knob's
   own range well but almost never lands on a corner of the *joint* space, so it can't stand in for
   these. At four or more knobs the corners are a 2ⁿ⁻¹ fractional factorial rather than every vertex,
   which keeps the knobs mutually orthogonal without the count exploding.
+
+Corners also repeat for every switch combination, including intermediate positions.
+See [control setup and capture counts](docs/capture_controls.md) for examples and limits.
 
 *Generate plan* builds the list. *Add corner captures to current plan* appends corners later without
 regenerating the LHS points or discarding captured progress.

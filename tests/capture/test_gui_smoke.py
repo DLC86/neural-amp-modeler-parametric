@@ -847,7 +847,7 @@ def test_sorting_remaps_capture_selected_and_capture_next(_qapp, tmp_path, monke
     # "Capture next" follows the list the user is reading, not the plan order.
     window._on_capture_next()
     assert captured[-1] is window._displayed_entries[0]
-    assert f"Set knobs to: {_format_params(captured[-1].params)}" in (
+    assert f"Set controls to: {_format_params(captured[-1].params)}" in (
         window.next_entry_label.text()
     )
     window.close()

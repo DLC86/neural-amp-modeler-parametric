@@ -23,7 +23,8 @@ sounddevice, the training stack) that the desktop app defers until needed.
 # (see ``nam.capture.session.measure_from_raw``). Parse it if it is ever compared: as
 # strings, "1.10.0" sorts below "1.2.0".
 # 1.3.0 keeps ASIO open and verifies the clean timing reference before/through captures.
-CAPTURE_APP_VERSION = "1.3.0"
+# 1.4.0 adds categorical switch controls and plans coverage per joint switch state.
+CAPTURE_APP_VERSION = "1.4.0"
 
 # The version raw recordings (``captures_raw/``) started being saved in. Fixed forever at
 # the version that introduced them, while CAPTURE_APP_VERSION moves on: a project created

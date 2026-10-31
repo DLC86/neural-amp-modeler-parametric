@@ -198,7 +198,8 @@ def _training_param_specs(project: CaptureProject) -> list[dict[str, _Any]]:
     for knob in project.knob_specs():
         spec = knob.to_param_spec().to_dict()
         # enum_names is a switch-only field; continuous-only projects don't carry it.
-        del spec["enum_names"]
+        if spec["type"] != "switch":
+            del spec["enum_names"]
         # avoid_zero is capture-planning metadata only; it has no training meaning.
         del spec["avoid_zero"]
         params.append(spec)
@@ -305,7 +306,8 @@ def build_al_model_config(
     for knob in project.knob_specs():
         spec = knob.to_param_spec().to_dict()
         # enum_names is a switch-only field; continuous-only projects don't carry it.
-        del spec["enum_names"]
+        if spec["type"] != "switch":
+            del spec["enum_names"]
         # Unlike the training model configs, step and avoid_zero are kept: the active-learning
         # proposal quantizer (quantize_to_capture_grid) reads them to snap g-opt results
         # onto the realizable capture grid and to honor avoid-zero knobs.

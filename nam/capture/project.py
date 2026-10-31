@@ -27,11 +27,12 @@ from pydantic import Field as _Field
 
 from . import CAPTURE_APP_VERSION as _CAPTURE_APP_VERSION
 from .params import DEFAULT_KNOB_STEP
+from .params import ControlSpec
 from .params import KnobSpec
+from .params import SwitchSpec
 from .planner import CAPTURES_DIRNAME
 from .planner import plan_captures as _plan_captures
 from .planner import plan_corner_captures as _plan_corner_captures
-
 
 PROJECT_FILENAME = "capture_project.json"
 DATA_FILENAME = "data.json"
@@ -76,6 +77,7 @@ def atomic_write_json(path: _Path, payload: _Any) -> None:
 
 
 class KnobModel(_BaseModel):
+    type: Literal["knob"] = "knob"
     name: str
     min: float
     max: float
@@ -96,8 +98,20 @@ class KnobModel(_BaseModel):
         )
 
     @classmethod
-    def from_knob_spec(cls, knob: KnobSpec) -> "KnobModel":
+    def from_knob_spec(cls, knob: ControlSpec) -> "KnobModel | SwitchModel":
+        if isinstance(knob, SwitchSpec):
+            return SwitchModel(**knob.to_dict())
         return cls(**knob.to_dict())
+
+
+class SwitchModel(_BaseModel):
+    type: Literal["switch"] = "switch"
+    name: str
+    enum_names: list[str]
+    default: int = 0
+
+    def to_knob_spec(self) -> SwitchSpec:
+        return SwitchSpec(self.name, tuple(self.enum_names), self.default)
 
 
 class WindowModel(_BaseModel):
@@ -221,7 +235,7 @@ class QAModel(_BaseModel):
 class CaptureEntryModel(_BaseModel):
     index: int
     split: Literal["train", "validation"]
-    params: dict[str, float]
+    params: dict[str, float | str]
     y_path: str
     status: Literal["pending", "captured"] = "pending"
     delay: _Optional[int] = None
@@ -241,7 +255,7 @@ class CaptureEntryModel(_BaseModel):
 class CaptureProject(_BaseModel):
     version: int = _PROJECT_VERSION
     name: str = ""
-    knobs: list[KnobModel]
+    knobs: list[KnobModel | SwitchModel]
     seed: int = 0
     train_input: str = "input_train.wav"
     validation_input: str = "input_validation.wav"
@@ -296,8 +310,11 @@ class CaptureProject(_BaseModel):
     # additive, which is what lets those projects open and carry on untouched.
     created_with_version: _Optional[str] = None
 
-    def knob_specs(self) -> tuple[KnobSpec, ...]:
+    def knob_specs(self) -> tuple[ControlSpec, ...]:
         return tuple(knob.to_knob_spec() for knob in self.knobs)
+
+    def control_specs(self) -> tuple[ControlSpec, ...]:
+        return self.knob_specs()
 
     def entries_for_split(
         self, split: Literal["train", "validation"]
@@ -318,7 +335,7 @@ class CaptureProject(_BaseModel):
 
 
 def new_project(
-    knobs: _Sequence[KnobSpec],
+    knobs: _Sequence[ControlSpec],
     *,
     n_train: int,
     n_validation: int,
@@ -532,7 +549,9 @@ def clear_captures(project: CaptureProject, project_dir: _Path) -> list[str]:
     return notes
 
 
-def migrate_legacy_peak_values(project: CaptureProject, project_dir: _Path) -> list[str]:
+def migrate_legacy_peak_values(
+    project: CaptureProject, project_dir: _Path
+) -> list[str]:
     """
     Recompute ``qa.peak`` in dBFS for captures saved back when it was a linear 0-1
     amplitude. dBFS is never positive, so a stored value greater than 0 is
@@ -556,9 +575,7 @@ def migrate_legacy_peak_values(project: CaptureProject, project_dir: _Path) -> l
         try:
             y = _np.asarray(wav_to_np(path), dtype=_np.float32).squeeze()
         except Exception as exc:
-            notes.append(
-                f"{entry.y_path}: could not recompute peak from WAV ({exc})."
-            )
+            notes.append(f"{entry.y_path}: could not recompute peak from WAV ({exc}).")
             continue
         peak = float(_np.max(_np.abs(y))) if len(y) else 0.0
         entry.qa.peak = peak_to_dbfs(peak)

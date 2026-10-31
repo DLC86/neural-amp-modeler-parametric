@@ -213,8 +213,10 @@ def make_capture_y_path(
     short form (see :func:`abbreviate_param_names`). Shared by the LHS starter script and
     the active-learning proposal driver so both name captures the same way.
     """
+    from urllib.parse import quote
+
     parts = [
-        f"{abbreviations[name]}{format_param_value(value)}"
+        quote(f"{abbreviations[name]}{format_param_value(value)}", safe="")
         for name, value in params.items()
     ]
     return f"{prefix}{'_'.join(parts)}.wav"

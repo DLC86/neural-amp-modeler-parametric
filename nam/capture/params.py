@@ -19,7 +19,6 @@ from typing import Sequence as _Sequence
 
 from ..models.parametric._spec import ParamSpec as _ParamSpec
 
-
 DEFAULT_KNOB_STEP = 0.5
 
 
@@ -78,7 +77,9 @@ class KnobSpec:
                 f"Knob {self.name!r} must satisfy min < max; got {self.min} >= {self.max}"
             )
         if self.step <= 0.0:
-            raise ValueError(f"Knob {self.name!r} step must be positive; got {self.step}")
+            raise ValueError(
+                f"Knob {self.name!r} step must be positive; got {self.step}"
+            )
         if self.step > self.max - self.min:
             raise ValueError(
                 f"Knob {self.name!r} step must not exceed the range width; "
@@ -144,7 +145,69 @@ class KnobSpec:
         )
 
 
-def validate_knobs(knobs: _Sequence[KnobSpec]) -> tuple[KnobSpec, ...]:
+@_dataclass(frozen=True)
+class SwitchSpec:
+    """A categorical control; position order and labels are preserved in exports."""
+
+    name: str
+    enum_names: tuple[str, ...]
+    default: int = 0
+
+    def __post_init__(self):
+        object.__setattr__(self, "name", str(self.name).strip())
+        if isinstance(self.enum_names, (str, bytes)):
+            raise ValueError("Switch positions must be a sequence of names")
+        labels = tuple(str(label).strip() for label in self.enum_names)
+        if len({label.casefold() for label in labels}) != len(labels):
+            raise ValueError("Switch position names must be unique (ignoring case)")
+        object.__setattr__(self, "enum_names", labels)
+        self.to_param_spec()  # Validate the name, count and default index.
+
+    @property
+    def is_gain(self) -> bool:
+        return False
+
+    def to_param_spec(self) -> _ParamSpec:
+        return _ParamSpec(
+            self.name,
+            0,
+            len(self.enum_names) - 1,
+            self.default,
+            type="switch",
+            enum_names=self.enum_names,
+        )
+
+    def to_dict(self) -> dict[str, _Any]:
+        return {
+            "type": "switch",
+            "name": self.name,
+            "enum_names": list(self.enum_names),
+            "default": self.default,
+        }
+
+
+ControlSpec = KnobSpec | SwitchSpec
+
+
+def capture_recommendations(controls: _Sequence[ControlSpec]) -> tuple[int, int, int]:
+    """Recommended train/validation totals and minimum joint-state coverage.
+
+    Each switch combination needs its own continuous-knob coverage. With no knobs,
+    every state is captured once and there are no held-out settings for validation.
+    These are sampling heuristics, not an accuracy guarantee.
+    """
+    n_knobs = sum(isinstance(control, KnobSpec) for control in controls)
+    combinations = _math.prod(
+        len(c.enum_names) for c in controls if isinstance(c, SwitchSpec)
+    )
+    return (
+        max(1, 15 * n_knobs) * combinations,
+        min(3 * n_knobs, 10) * combinations,
+        combinations,
+    )
+
+
+def validate_knobs(knobs: _Sequence[ControlSpec]) -> tuple[ControlSpec, ...]:
     """
     Validate a knob set as a whole and return it as a tuple.
 
@@ -153,7 +216,7 @@ def validate_knobs(knobs: _Sequence[KnobSpec]) -> tuple[KnobSpec, ...]:
     """
     knobs = tuple(knobs)
     if len(knobs) == 0:
-        raise ValueError("At least one knob is required")
+        raise ValueError("At least one control is required")
     seen: dict[str, str] = {}
     for knob in knobs:
         key = knob.name.lower()
@@ -171,7 +234,7 @@ def validate_knobs(knobs: _Sequence[KnobSpec]) -> tuple[KnobSpec, ...]:
     return knobs
 
 
-def gain_knob_index(knobs: _Sequence[KnobSpec]) -> _Optional[int]:
+def gain_knob_index(knobs: _Sequence[ControlSpec]) -> _Optional[int]:
     """
     Position of the knob marked Gain/Drive, or ``None`` if none is. Assumes the knob set
     has passed :func:`validate_knobs` (at most one gain knob).

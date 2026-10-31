@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QDialogButtonBox as _QDialogButtonBox
 from PySide6.QtWidgets import QDoubleSpinBox as _QDoubleSpinBox
 from PySide6.QtWidgets import QFileDialog as _QFileDialog
 from PySide6.QtWidgets import QFormLayout as _QFormLayout
+from PySide6.QtWidgets import QInputDialog as _QInputDialog
 from PySide6.QtWidgets import QLineEdit as _QLineEdit
 from PySide6.QtWidgets import QHBoxLayout as _QHBoxLayout
 from PySide6.QtWidgets import QLabel as _QLabel
@@ -56,6 +57,8 @@ from ..export import write_concat_training_configs as _write_concat_training_con
 from ..export import write_hyper_training_configs as _write_hyper_training_configs
 from ..export import write_hyper_a2_training_configs as _write_hyper_a2_training_configs
 from ..params import KnobSpec as _KnobSpec
+from ..params import SwitchSpec as _SwitchSpec
+from ..params import capture_recommendations as _capture_recommendations
 from ..params import validate_knobs as _validate_knobs
 from ..planner import corner_capture_count as _corner_capture_count
 from ..planner import settings_sort_key as _settings_sort_key
@@ -133,11 +136,12 @@ def _latency_index(value) -> int:
     return -1
 
 
-def format_number(value: float) -> str:
+def format_number(value: float | str) -> str:
     """
     Render a knob value the way a user would dial it: "3.5", not "3.500000".
     """
-
+    if isinstance(value, str):
+        return value
     text = f"{float(value):.6f}".rstrip("0").rstrip(".")
     return text if text else "0"
 
@@ -201,7 +205,9 @@ def sort_entries(
     )
 
 
-def knob_rows_to_specs(rows: _Sequence[tuple]) -> list[_KnobSpec]:
+def knob_rows_to_specs(
+    rows: _Sequence[tuple | _SwitchSpec],
+) -> list[_KnobSpec | _SwitchSpec]:
     """
     Convert raw (name, min, max, step, avoid_zero[, is_gain]) table rows into
     :class:`KnobSpec`\\ s. The trailing ``is_gain`` flag is optional and defaults to False.
@@ -212,6 +218,9 @@ def knob_rows_to_specs(rows: _Sequence[tuple]) -> list[_KnobSpec]:
 
     specs = []
     for row in rows:
+        if isinstance(row, _SwitchSpec):
+            specs.append(row)
+            continue
         name, min_value, max_value, step_value, avoid_zero = row[:5]
         is_gain = row[5] if len(row) > 5 else False
         specs.append(
@@ -453,7 +462,7 @@ class MainWindow(_QMainWindow):
         tabs = _QTabWidget()
         self.setCentralWidget(tabs)
         tabs.addTab(self._build_project_tab(), "Project")
-        tabs.addTab(self._build_knobs_tab(), "Knobs")
+        tabs.addTab(self._build_knobs_tab(), "Controls")
         tabs.addTab(self._build_plan_tab(), "Plan")
         tabs.addTab(self._build_audio_tab(), "Audio I/O")
         tabs.addTab(self._build_capture_tab(), "Capture")
@@ -555,10 +564,20 @@ class MainWindow(_QMainWindow):
     def _build_knobs_tab(self) -> _QWidget:
         widget = _QWidget()
         layout = _QVBoxLayout(widget)
-
-        self.knob_table = _QTableWidget(0, 6)
+        self.knob_table = _QTableWidget(0, 8)
+        self.controls_table = self.knob_table
+        self.knob_table.setColumnWidth(7, 180)
         self.knob_table.setHorizontalHeaderLabels(
-            ["Name", "Min", "Max", "Step", "Avoid zero", "Gain/Drive"]
+            [
+                "Name",
+                "Min",
+                "Max",
+                "Step",
+                "Avoid zero",
+                "Gain/Drive",
+                "Type",
+                "Positions",
+            ]
         )
         self.knob_table.setToolTip(
             'Tick "Avoid zero" for gain/drive knobs so no capture sets them to zero '
@@ -570,8 +589,8 @@ class MainWindow(_QMainWindow):
         layout.addWidget(self.knob_table)
 
         row_buttons = _QHBoxLayout()
-        add_button = _QPushButton("Add knob")
-        add_button.clicked.connect(self._on_add_knob_row)
+        add_button = _QPushButton("Add control")
+        add_button.clicked.connect(self._on_add_control)
         remove_button = _QPushButton("Remove selected")
         remove_button.clicked.connect(self._on_remove_knob_row)
         row_buttons.addWidget(add_button)
@@ -590,6 +609,7 @@ class MainWindow(_QMainWindow):
         self.n_train_spin.setRange(1, 100_000)
         self.n_train_spin.setValue(10)
         self.n_train_recommended_label = _QLabel("")
+        self.n_train_recommended_label.setWordWrap(True)
         n_train_row = _QHBoxLayout()
         n_train_row.addWidget(self.n_train_spin)
         n_train_row.addWidget(self.n_train_recommended_label)
@@ -598,6 +618,7 @@ class MainWindow(_QMainWindow):
         self.n_validation_spin.setRange(0, 100_000)
         self.n_validation_spin.setValue(5)
         self.n_validation_recommended_label = _QLabel("")
+        self.n_validation_recommended_label.setWordWrap(True)
         n_validation_row = _QHBoxLayout()
         n_validation_row.addWidget(self.n_validation_spin)
         n_validation_row.addWidget(self.n_validation_recommended_label)
@@ -621,7 +642,8 @@ class MainWindow(_QMainWindow):
             "orthogonal at the extremes, so no two of them are stuck at the same value in "
             "every corner. LHS cannot stand in for these: it covers each knob's range "
             "well on its own but almost never lands on a corner of the joint space. "
-            "Deduplicated against the LHS points and any corners already planned."
+            "Repeated for EVERY combination of switch positions, including intermediate "
+            "positions. Deduplicated against LHS points and corners already planned."
         )
         layout.addWidget(self.include_corners_check)
 
@@ -953,7 +975,7 @@ class MainWindow(_QMainWindow):
                 self,
                 "Project already exists",
                 f"A project ({_PROJECT_FILENAME}) already exists in this folder. "
-                "Creating a new project overwrites its plan and knob settings "
+                "Creating a new project overwrites its plan and control settings "
                 "when you generate a plan (captured WAV files are left in place).\n\n"
                 'To keep your existing work, choose No and use "Open Project..." '
                 "instead.\n\nCreate a new project here anyway?",
@@ -1007,7 +1029,7 @@ class MainWindow(_QMainWindow):
         self._train_input_name = train_name
         self._validation_input_name = validation_name
         self.project_label.setText(
-            f"Project folder: {project_dir} (no plan yet -- use the Knobs tab)"
+            f"Project folder: {project_dir} (no plan yet -- use the Controls tab)"
         )
         self.project_log.appendPlainText(f"New project folder: {project_dir}")
         if recorded:
@@ -1246,6 +1268,9 @@ class MainWindow(_QMainWindow):
             return
         self.knob_table.setRowCount(0)
         for knob in self.project.knobs:
+            if getattr(knob, "type", "knob") == "switch":
+                self._add_switch_row(knob.to_knob_spec())
+                continue
             self._add_knob_row(
                 knob.name, knob.min, knob.max, knob.step, knob.avoid_zero, knob.is_gain
             )
@@ -1264,6 +1289,138 @@ class MainWindow(_QMainWindow):
         self._refresh_corner_count()
 
     # -- knobs / plan --------------------------------------------------
+    def _on_add_control(self) -> None:
+        kind, accepted = _QInputDialog.getItem(
+            self, "Add control", "Control type:", ["Knob", "Switch"], 0, False
+        )
+        if not accepted:
+            return
+        if kind == "Knob":
+            self._on_add_knob_row()
+        else:
+            spec = self._edit_switch(_SwitchSpec("Switch", ("Off", "On")))
+            if spec is not None:
+                self._add_switch_row(spec)
+                self._apply_n_train_recommendation()
+                self._apply_n_validation_recommendation()
+                self._refresh_corner_count()
+
+    def _edit_switch(self, spec: _SwitchSpec):
+        dialog = _QDialog(self)
+        dialog.setWindowTitle("Switch positions")
+        layout = _QVBoxLayout(dialog)
+        form = _QFormLayout()
+        name = _QLineEdit(spec.name)
+        count = _QSpinBox()
+        count.setRange(2, 1024)
+        count.setValue(len(spec.enum_names))
+        form.addRow("Switch name", name)
+        form.addRow("Number of positions", count)
+        layout.addLayout(form)
+        labels = _QTableWidget(len(spec.enum_names), 1)
+        labels.setHorizontalHeaderLabels(["Position name (in switch order)"])
+        labels.horizontalHeader().setStretchLastSection(True)
+        for i, label in enumerate(spec.enum_names):
+            labels.setItem(i, 0, _QTableWidgetItem(label))
+
+        def resize_positions(n):
+            old = labels.rowCount()
+            labels.setRowCount(n)
+            for i in range(old, n):
+                labels.setItem(i, 0, _QTableWidgetItem(f"Position {i + 1}"))
+
+        count.valueChanged.connect(resize_positions)
+        layout.addWidget(labels)
+        buttons = _QDialogButtonBox(
+            _QDialogButtonBox.StandardButton.Ok
+            | _QDialogButtonBox.StandardButton.Cancel
+        )
+        result = []
+
+        def accept():
+            try:
+                result.append(
+                    _SwitchSpec(
+                        name.text(),
+                        tuple(
+                            labels.item(i, 0).text() if labels.item(i, 0) else ""
+                            for i in range(labels.rowCount())
+                        ),
+                        min(spec.default, count.value() - 1),
+                    )
+                )
+            except ValueError as exc:
+                _QMessageBox.warning(dialog, "Invalid switch", str(exc))
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(430, 380)
+        return result[0] if dialog.exec() == _QDialog.DialogCode.Accepted else None
+
+    def _add_switch_row(self, spec: _SwitchSpec) -> None:
+        self._add_knob_row(spec.name, "", "", "")
+        row = self.knob_table.rowCount() - 1
+        self._set_switch_row(row, spec)
+
+    def _set_switch_row(self, row: int, spec: _SwitchSpec) -> None:
+        self.knob_table.blockSignals(True)
+        try:
+            self.knob_table.item(row, 0).setText(spec.name)
+            kind = self.knob_table.item(row, 6)
+            kind.setText("Switch")
+            kind.setData(_Qt.ItemDataRole.UserRole, spec)
+            for col in range(1, 6):
+                item = self.knob_table.item(row, col)
+                item.setText("")
+                item.setFlags(_Qt.ItemFlag.NoItemFlags)
+            button = _QPushButton(f"{len(spec.enum_names)} positions — edit")
+            button.setToolTip(" / ".join(spec.enum_names))
+
+            # Locate the button dynamically: deleting earlier rows changes row indexes.
+            def edit():
+                index = next(
+                    (
+                        i
+                        for i in range(self.knob_table.rowCount())
+                        if self.knob_table.cellWidget(i, 7) is button
+                    ),
+                    None,
+                )
+                if index is None:
+                    return
+                current = self.knob_table.item(index, 6).data(_Qt.ItemDataRole.UserRole)
+                current = _SwitchSpec(
+                    self.knob_table.item(index, 0).text().strip() or current.name,
+                    current.enum_names,
+                    current.default,
+                )
+                updated = self._edit_switch(current)
+                if updated is not None:
+                    self._set_switch_row(index, updated)
+                    self._apply_n_train_recommendation()
+                    self._apply_n_validation_recommendation()
+                    self._refresh_corner_count()
+
+            button.clicked.connect(edit)
+            self.knob_table.setCellWidget(row, 7, button)
+        finally:
+            self.knob_table.blockSignals(False)
+
+    def _control_recommendations(self):
+        # Names and numeric fields may still be incomplete while editing a row.
+        controls = []
+        for row in range(self.knob_table.rowCount()):
+            kind = self.knob_table.item(row, 6)
+            switch = kind.data(_Qt.ItemDataRole.UserRole) if kind else None
+            controls.append(
+                switch
+                if isinstance(switch, _SwitchSpec)
+                else _KnobSpec(f"Control {row}", 0, 10)
+            )
+        return _capture_recommendations(controls)
 
     def _on_add_knob_row(self) -> None:
         self._add_knob_row("", 0.0, 10.0, 0.5, False, False)
@@ -1290,6 +1447,9 @@ class MainWindow(_QMainWindow):
                 self.knob_table.setItem(row, col, _QTableWidgetItem(str(value)))
             self.knob_table.setItem(row, 4, self._make_check_item(avoid_zero))
             self.knob_table.setItem(row, 5, self._make_check_item(is_gain))
+            kind = _QTableWidgetItem("Knob")
+            kind.setFlags(_Qt.ItemFlag.ItemIsEnabled | _Qt.ItemFlag.ItemIsSelectable)
+            self.knob_table.setItem(row, 6, kind)
         finally:
             self.knob_table.blockSignals(False)
 
@@ -1335,7 +1495,7 @@ class MainWindow(_QMainWindow):
         with the knob count fast enough that the user should see it before committing to
         the plan rather than after.
         """
-        # The Knobs tab is built (and seeds a first row) before the Plan tab that owns the
+        # The Controls tab is built (and seeds a first row) before the Plan tab that owns the
         # label, so this can run before the label exists.
         if getattr(self, "corner_count_label", None) is None:
             return
@@ -1347,7 +1507,9 @@ class MainWindow(_QMainWindow):
         except ValueError:
             self.corner_count_label.setText("")
             return
-        text = f"Corner captures for this knob set: {count}"
+        text = (
+            f"Corner captures for this control set: {count} (all switch combinations)"
+        )
         if count > _CORNER_COUNT_ADVISORY:
             text += " — that is a long session; consider fewer knobs or plan for it."
         self.corner_count_label.setText(text)
@@ -1358,10 +1520,23 @@ class MainWindow(_QMainWindow):
         Always kept current, independent of whether the spinner's value tracks it --
         see ``_apply_n_train_recommendation`` for that.
         """
-        k = self.knob_table.rowCount()
-        recommended = _RECOMMENDED_LHS_PER_KNOB * k
+        k = sum(
+            self.knob_table.item(r, 6).text() == "Knob"
+            for r in range(self.knob_table.rowCount())
+        )
+        recommended, _, combinations = self._control_recommendations()
+        if k == 0:
+            self.n_train_recommended_label.setText(
+                f"Recommended: {recommended} (one per switch combination; minimum: {combinations})"
+            )
+            return
         self.n_train_recommended_label.setText(
             f"Recommended: {recommended} ({_RECOMMENDED_LHS_PER_KNOB} * {k} Knobs)"
+            + (
+                f" × {combinations} switch combinations; minimum: {combinations}"
+                if combinations > 1
+                else ""
+            )
         )
 
     def _refresh_n_validation_recommendation(self) -> None:
@@ -1369,13 +1544,19 @@ class MainWindow(_QMainWindow):
         count. Always kept current, independent of whether the spinner's value tracks
         it -- see ``_apply_n_validation_recommendation`` for that.
         """
-        k = self.knob_table.rowCount()
-        recommended = min(
-            _RECOMMENDED_VALIDATION_PER_KNOB * k, _RECOMMENDED_VALIDATION_MAX
-        )
+        _, recommended, combinations = self._control_recommendations()
         self.n_validation_recommended_label.setText(
             f"Recommended: {recommended} "
             f"({_RECOMMENDED_VALIDATION_PER_KNOB} per Knob, max {_RECOMMENDED_VALIDATION_MAX})"
+            + (
+                f" per switch combination ({combinations}); minimum if enabled: {combinations}"
+                if recommended and combinations > 1
+                else (
+                    " — switches only: all states train, no held-out settings"
+                    if not recommended
+                    else ""
+                )
+            )
         )
 
     def _no_plan_generated_yet(self) -> bool:
@@ -1395,13 +1576,12 @@ class MainWindow(_QMainWindow):
         must never be silently overwritten, since regenerating with a changed count
         discards capture progress.
         """
-        # The Knobs tab is built (and seeds a first row) before the Plan tab that owns
+        # The Controls tab is built (and seeds a first row) before the Plan tab that owns
         # this spinner, so this can run before it exists.
         if getattr(self, "n_train_spin", None) is None:
             return
         if self._no_plan_generated_yet():
-            k = self.knob_table.rowCount()
-            self.n_train_spin.setValue(_RECOMMENDED_LHS_PER_KNOB * k)
+            self.n_train_spin.setValue(self._control_recommendations()[0])
 
     def _apply_n_validation_recommendation(self) -> None:
         """Snap the validation-capture spinner to the recommendation for the current
@@ -1411,15 +1591,23 @@ class MainWindow(_QMainWindow):
         if getattr(self, "n_validation_spin", None) is None:
             return
         if self._no_plan_generated_yet():
-            k = self.knob_table.rowCount()
-            recommended = min(
-                _RECOMMENDED_VALIDATION_PER_KNOB * k, _RECOMMENDED_VALIDATION_MAX
-            )
+            recommended = self._control_recommendations()[1]
             self.n_validation_spin.setValue(recommended)
 
     def _knob_table_rows(self) -> list[tuple]:
         rows = []
         for row in range(self.knob_table.rowCount()):
+            kind = self.knob_table.item(row, 6)
+            switch = kind.data(_Qt.ItemDataRole.UserRole) if kind else None
+            if isinstance(switch, _SwitchSpec):
+                rows.append(
+                    _SwitchSpec(
+                        self.knob_table.item(row, 0).text(),
+                        switch.enum_names,
+                        switch.default,
+                    )
+                )
+                continue
             values = []
             for col in range(4):
                 item = self.knob_table.item(row, col)
@@ -1443,7 +1631,7 @@ class MainWindow(_QMainWindow):
             specs = knob_rows_to_specs(self._knob_table_rows())
             _validate_knobs(specs)
         except ValueError as exc:
-            _QMessageBox.critical(self, "Invalid knob settings", str(exc))
+            _QMessageBox.critical(self, "Invalid control settings", str(exc))
             return
 
         if self.project is not None and self.project.captured_entries():
@@ -1551,14 +1739,17 @@ class MainWindow(_QMainWindow):
             specs = knob_rows_to_specs(self._knob_table_rows())
             _validate_knobs(specs)
         except ValueError as exc:
-            _QMessageBox.critical(self, "Invalid knob settings", str(exc))
+            _QMessageBox.critical(self, "Invalid control settings", str(exc))
             return
-        if [spec.name for spec in specs] != [knob.name for knob in self.project.knobs]:
+        if [(spec.name, getattr(spec, "enum_names", None)) for spec in specs] != [
+            (spec.name, getattr(spec, "enum_names", None))
+            for spec in self.project.knob_specs()
+        ]:
             _QMessageBox.warning(
                 self,
-                "Knobs changed",
-                "The knobs in the table differ from the plan's knobs. Regenerate the "
-                "plan first (the corner captures must match the planned knob set).",
+                "Controls changed",
+                "The controls or switch positions differ from the plan. Regenerate the "
+                "plan first (corner captures must match the planned controls and positions).",
             )
             return
         self.project.knobs = [_KnobModel.from_knob_spec(spec) for spec in specs]
@@ -2470,7 +2661,7 @@ class MainWindow(_QMainWindow):
             return
         self.next_entry_label.setText(
             f"Next ({entry.split} #{entry.index}): "
-            f"Set knobs to: {format_params(entry.params)}"
+            f"Set controls to: {format_params(entry.params)}"
         )
 
     def _refresh_status_bar(self) -> None:

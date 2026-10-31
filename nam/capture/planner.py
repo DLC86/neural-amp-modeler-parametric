@@ -32,9 +32,8 @@ from ..models.parametric import switch_combinations as _switch_combinations
 from ..models.parametric import ParamSpec as _ParamSpec
 from .params import DEFAULT_KNOB_STEP as _DEFAULT_KNOB_STEP
 from .params import gain_knob_index as _gain_knob_index
-from .params import KnobSpec as _KnobSpec
+from .params import ControlSpec as _ControlSpec
 from .params import validate_knobs as _validate_knobs
-
 
 # Large, fixed offset so the validation draws are a different LHS stream than the train
 # draws (held-out settings), while staying reproducible from the same seed.
@@ -216,7 +215,9 @@ def sample_unique_settings(
     rng = _np.random.default_rng(seed)
     batch = max(n, 256)
     for _ in range(_OVERSAMPLE_BATCHES):
-        if _consume(sample_raw_settings(specs, batch, seed=int(rng.integers(0, 2**32)))):
+        if _consume(
+            sample_raw_settings(specs, batch, seed=int(rng.integers(0, 2**32)))
+        ):
             return ordered
 
     # The grid is coarse enough that random draws keep colliding. Fill the remainder
@@ -503,7 +504,7 @@ def _planned_from_params(
 
 
 def plan_captures(
-    knobs: _Sequence[_KnobSpec],
+    knobs: _Sequence[_ControlSpec],
     *,
     n_train: int,
     n_validation: int,
@@ -532,6 +533,53 @@ def plan_captures(
     if n_validation < 0:
         raise ValueError(f"n_validation must be non-negative; got {n_validation}")
     specs = tuple(knob.to_param_spec() for knob in knobs)
+
+    if any(spec.type == "switch" for spec in specs):
+        switches = [spec for spec in specs if spec.type == "switch"]
+        continuous = [
+            control for control in knobs if control.to_param_spec().type != "switch"
+        ]
+        count = _math.prod(spec.num_inputs for spec in switches)
+        if n_train < count or (n_validation and n_validation < count):
+            raise ValueError(
+                f"Cover all {count} switch combinations: training and each enabled "
+                "validation split need at least one capture per combination."
+            )
+        if not continuous and (n_train != count or n_validation):
+            raise ValueError(
+                f"With switches only, capture each of the {count} combinations once "
+                "and set validation to 0: no unseen settings remain for validation."
+            )
+        training, validation = [], []
+        for i, combo in enumerate(
+            _itertools.product(*(spec.enum_names for spec in switches))
+        ):
+            fixed = dict(zip((spec.name for spec in switches), combo))
+            if continuous:
+                try:
+                    train_part, val_part = plan_captures(
+                        continuous,
+                        n_train=n_train // count + (i < n_train % count),
+                        n_validation=n_validation // count + (i < n_validation % count),
+                        seed=(seed + i * 104729) % (2**32),
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"Switch combination {fixed}: {exc}") from exc
+                training.extend({**capture.params, **fixed} for capture in train_part)
+                validation.extend({**capture.params, **fixed} for capture in val_part)
+            else:
+                training.append(fixed)
+        # Restore control order for display and exported metadata.
+        training = [
+            {spec.name: params[spec.name] for spec in specs} for params in training
+        ]
+        validation = [
+            {spec.name: params[spec.name] for spec in specs} for params in validation
+        ]
+        return (
+            _planned_from_params("lhs", "train", specs, training),
+            _planned_from_params("val_lhs", "validation", specs, validation),
+        )
 
     corner_keys = {
         _settings_key(params, specs)
@@ -603,9 +651,7 @@ def _corner_vertices(n: int) -> list[tuple[bool, ...]]:
     ]
 
 
-def _corner_high_flag_sets(
-    n: int, gain_index: _Optional[int]
-) -> list[list[bool]]:
+def _corner_high_flag_sets(n: int, gain_index: _Optional[int]) -> list[list[bool]]:
     """
     The per-corner max/min pattern (True = knob at max) before dedup: the vertex set from
     :func:`_corner_vertices`, crossed with the gain knob's min and max when one is marked
@@ -643,6 +689,24 @@ def corner_settings(
     min/max) don't repeat a setting.
     """
     specs = tuple(specs)
+    if any(spec.type == "switch" for spec in specs):
+        continuous = tuple(spec for spec in specs if spec.type != "switch")
+        switches = tuple(spec for spec in specs if spec.type == "switch")
+        continuous_gain = (
+            sum(spec.type != "switch" for spec in specs[:gain_index])
+            if gain_index is not None
+            else None
+        )
+        corners = corner_settings(
+            continuous, gain_index=continuous_gain, default_step=default_step
+        )
+        settings = []
+        for combo in _itertools.product(*(spec.enum_names for spec in switches)):
+            fixed = dict(zip((spec.name for spec in switches), combo))
+            for corner in corners:
+                combined = {**corner, **fixed}
+                settings.append({spec.name: combined[spec.name] for spec in specs})
+        return settings
     seen: set[tuple[_Any, ...]] = set()
     settings: list[dict[str, _Any]] = []
     for highs in _corner_high_flag_sets(len(specs), gain_index):
@@ -658,20 +722,27 @@ def corner_settings(
 
 
 def corner_capture_count(
-    knobs: _Sequence[_KnobSpec], *, default_step: float = _DEFAULT_KNOB_STEP
+    knobs: _Sequence[_ControlSpec], *, default_step: float = _DEFAULT_KNOB_STEP
 ) -> int:
     """How many distinct corner captures ``knobs`` will produce."""
     knobs = _validate_knobs(knobs)
     specs = tuple(knob.to_param_spec() for knob in knobs)
+    continuous = tuple(spec for spec in specs if spec.type != "switch")
+    gain = _gain_knob_index(knobs)
+    continuous_gain = (
+        sum(spec.type != "switch" for spec in specs[:gain])
+        if gain is not None
+        else None
+    )
     return len(
         corner_settings(
-            specs, gain_index=_gain_knob_index(knobs), default_step=default_step
+            continuous, gain_index=continuous_gain, default_step=default_step
         )
-    )
+    ) * _math.prod(spec.num_inputs for spec in specs if spec.type == "switch")
 
 
 def plan_corner_captures(
-    knobs: _Sequence[_KnobSpec],
+    knobs: _Sequence[_ControlSpec],
     *,
     exclude: _Optional[set[tuple[_Any, ...]]] = None,
     index_offset: int = 0,
@@ -712,7 +783,19 @@ def plan_corner_captures(
         "corner",
         "train",
         specs,
-        sort_settings(unique, [spec.name for spec in specs]),
+        sorted(
+            unique,
+            key=lambda params: (
+                tuple(
+                    spec.enum_names.index(params[spec.name])
+                    for spec in specs
+                    if spec.type == "switch"
+                ),
+                settings_sort_key(
+                    params, [spec.name for spec in specs if spec.type != "switch"]
+                ),
+            ),
+        ),
         index_offset=index_offset,
         filename_start=filename_start,
     )
